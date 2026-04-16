@@ -1,0 +1,10 @@
+# Downloaded patent PDF artifacts
+[0-9]*/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
