@@ -65,16 +65,20 @@ WEB SERVER
 
 import re
 import io
+import os
 import time
 
 import requests
 from PyPDF2 import PdfWriter
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-API_KEY  = "fglntfxamrtqijegxwzuwbbprnyonp"
+API_KEY  = os.environ["USPTO_API_KEY"]
 BASE_API = "https://api.uspto.gov/api/v1/patent/applications"
 HEADERS  = {"X-API-KEY": API_KEY, "Accept": "application/json"}
 

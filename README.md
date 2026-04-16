@@ -1,7 +1,5 @@
 # Patent Prosecution Bundles API — USPTO Patent File Wrapper
 
-> ⚠️ **Review before deploying:** `API_KEY` is hardcoded at line 77 of `bundles_api.py`. Move it to an environment variable or secrets manager before hosting publicly.
-
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.x-3776ab?style=for-the-badge" />
   <img src="https://img.shields.io/badge/FastAPI-Web_Server-009688?style=for-the-badge" />
@@ -65,6 +63,15 @@ A standalone CLI and FastAPI web server that retrieves USPTO patent prosecution 
 | `US20210367709A1` | `US` prefix + publication kind code `A1` → publication-to-app lookup |
 | `11973593` | tries as application number first; if not found, falls back to patent lookup |
 | `11973593 --patent` | `--patent` flag forces patent-to-app lookup directly |
+
+**Setup:**
+
+```bash
+pip install fastapi uvicorn requests PyPDF2 python-dotenv
+
+# Create a .env file with your USPTO API key
+echo "USPTO_API_KEY=your_key_here" > .env
+```
 
 **CLI usage:**
 
