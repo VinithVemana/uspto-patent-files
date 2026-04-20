@@ -12,7 +12,7 @@
 
 <p align="center">
 A standalone CLI and FastAPI web server that retrieves USPTO <strong>and EP (European Patent)</strong> prosecution history, classifies documents into logical prosecution bundles, merges them into downloadable PDFs, and serves them via streaming REST endpoints.<br/>
-<strong>bundles_api.py</strong> — USPTO CLI &nbsp;|&nbsp; <strong>bundles_api_ep.py</strong> — EP CLI &nbsp;|&nbsp; <strong>bundles_server.py</strong> — FastAPI hosting layer &nbsp;|&nbsp; <strong>ep/</strong> — EP module (config / auth / OPS / register / bundles)
+<strong>bundles_api.py</strong> — USPTO CLI &nbsp;|&nbsp; <strong>bundles_api_ep.py</strong> — EP CLI &nbsp;|&nbsp; <strong>bundles_server.py</strong> — FastAPI hosting layer &nbsp;|&nbsp; <strong>us/</strong> — USPTO module (config / client / resolver / bundles / pdf / manifest) &nbsp;|&nbsp; <strong>ep/</strong> — EP module (config / auth / OPS / register / bundles)
 </p>
 
 ---

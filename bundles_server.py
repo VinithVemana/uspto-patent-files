@@ -78,16 +78,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from bundles_api import (
-    resolve_application_number,
-    get_patent_pdf_url,
-    _get_metadata,
-    build_prosecution_bundles,
-    _build_three_bundles,
-    _merge_bundle_pdfs,
-    _merge_fwclm_pdf,
-    HEADERS,
-)
+from us.resolver import resolve_application_number
+from us.client import _get_metadata
+from us.bundles import build_prosecution_bundles, _build_three_bundles
+from us.pdf import get_patent_pdf_url, _merge_bundle_pdfs, _merge_fwclm_pdf
+from us.config import HEADERS, GOOGLE_PATENTS_HEADERS
 
 # --- EP module ---
 from ep import bundles as ep_bundles
@@ -221,7 +216,7 @@ def download_patent_pdf(application_number: str):
     try:
         r = requests.get(
             pdf_url,
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers=GOOGLE_PATENTS_HEADERS,
             timeout=60,
             stream=True,
         )
@@ -362,7 +357,7 @@ def download_all_bundles_zip(application_number: str):
                 try:
                     r = requests.get(
                         pdf_url,
-                        headers={"User-Agent": "Mozilla/5.0"},
+                        headers=GOOGLE_PATENTS_HEADERS,
                         timeout=60,
                     )
                     if r.status_code == 200:
