@@ -34,6 +34,10 @@ GET /bundles/{application_number}/all.zip
   Stream a ZIP of all bundle PDFs.
   Same show_extra / show_intclaim flags apply.
 
+GET /bundles/{application_number}/index-of-claims.pdf
+  Stream a merged PDF of all FWCLM (Index of Claims) documents.
+  Returns 404 when no FWCLM docs exist for this application.
+
 GET /bundles/{application_number}/patent.pdf
   Stream the full granted patent PDF (sourced from Google Patents CDN).
   Returns 404 if the application has not been granted or no PDF is found.
@@ -58,6 +62,7 @@ from bundles_api import (
     build_prosecution_bundles,
     _build_three_bundles,
     _merge_bundle_pdfs,
+    _merge_fwclm_pdf,
     HEADERS,
 )
 
@@ -246,6 +251,33 @@ def download_bundle_pdf(
     )
 
 
+@app.get("/bundles/{application_number}/index-of-claims.pdf")
+def download_index_of_claims(application_number: str):
+    """
+    Stream a merged PDF of all FWCLM (Index of Claims) documents.
+    Returns 404 when no FWCLM docs exist for this application.
+    """
+    try:
+        app_no = resolve_application_number(application_number)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    bundles = build_prosecution_bundles(app_no)
+    if not bundles:
+        raise HTTPException(status_code=404, detail="No documents found for this application")
+
+    try:
+        pdf = _merge_fwclm_pdf(bundles)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return StreamingResponse(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="Index_of_claims.pdf"'},
+    )
+
+
 @app.get("/bundles/{application_number}/all.zip")
 def download_all_bundles_zip(application_number: str):
     """
@@ -284,6 +316,13 @@ def download_all_bundles_zip(application_number: str):
                 zf.writestr(f"{b['filename']}.pdf", pdf.getvalue())
             except ValueError:
                 pass   # skip bundles with no PDFs
+
+        # Index of Claims PDF — mirrors CLI _download_index_of_claims()
+        try:
+            fwclm_pdf = _merge_fwclm_pdf(bundles)
+            zf.writestr("Index_of_claims.pdf", fwclm_pdf.getvalue())
+        except (ValueError, Exception):
+            pass   # best effort — skip if no FWCLM docs
 
         # Full patent PDF — mirrors CLI _download_patent_pdf()
         patent_no = meta.get("patent_number")

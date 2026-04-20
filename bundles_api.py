@@ -50,7 +50,7 @@ RUN FROM THE COMMAND LINE
 
     Examples — by patent grant number:
       python bundles_api.py US10902286           # US prefix → auto-resolve
-      python bundles_api.py US11973593B2         # kind code stripped automatically
+      python bundles_api.py US10230476B1         # kind code stripped automatically
       python bundles_api.py 11973593 --patent    # bare digits, force patent route
       python bundles_api.py US10902286 --text
       python bundles_api.py US10902286 --download --output-dir ./pdfs
@@ -622,6 +622,51 @@ def _merge_bundle_pdfs(
 
 
 # ---------------------------------------------------------------------------
+# Index-of-Claims PDF helper
+# ---------------------------------------------------------------------------
+
+def _merge_fwclm_pdf(bundles: list) -> io.BytesIO:
+    """
+    Collect all FWCLM (Index of Claims) docs across all prosecution bundles,
+    merge their PDFs in date order, and return the merged BytesIO.
+    Raises ValueError when no FWCLM docs are found or none could be fetched.
+    """
+    seen, fwclm_docs = set(), []
+    for b in bundles:
+        for doc in b["documents"]:
+            if doc["code"] == "FWCLM" and doc.get("pdf_url") and doc["pdf_url"] not in seen:
+                seen.add(doc["pdf_url"])
+                fwclm_docs.append(doc)
+    fwclm_docs.sort(key=lambda d: d["date"])
+
+    if not fwclm_docs:
+        raise ValueError("No FWCLM (Index of Claims) documents found")
+
+    merger = PdfWriter()
+    count  = 0
+    for doc in fwclm_docs:
+        try:
+            r = requests.get(doc["pdf_url"], headers=HEADERS, timeout=30)
+            if r.status_code == 200:
+                merger.append(
+                    io.BytesIO(r.content),
+                    outline_item=f"FWCLM — {doc['desc']} ({doc['date'][:10]})",
+                )
+                count += 1
+        except Exception as e:
+            print(f"PDF fetch failed [{doc.get('pdf_url')}]: {e}")
+
+    if count == 0:
+        raise ValueError("Could not retrieve any FWCLM PDFs")
+
+    out = io.BytesIO()
+    merger.write(out)
+    merger.close()
+    out.seek(0)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -723,6 +768,19 @@ Examples:
         except Exception as exc:
             print(f"  Failed to download patent PDF: {exc}", file=sys.stderr)
 
+    def _download_index_of_claims() -> None:
+        """Download all FWCLM docs merged into Index_of_claims.pdf."""
+        filepath = os.path.join(output_dir, "Index_of_claims.pdf")
+        print("  Fetching Index of Claims (FWCLM) ...", file=sys.stderr)
+        try:
+            pdf = _merge_fwclm_pdf(bundles)
+            with open(filepath, "wb") as fh:
+                fh.write(pdf.getvalue())
+            size_kb = os.path.getsize(filepath) // 1024
+            print(f"  Saved Index_of_claims.pdf ({size_kb:,} KB)", file=sys.stderr)
+        except ValueError as exc:
+            print(f"  Index of Claims not available: {exc}", file=sys.stderr)
+
     # ================================================================== SEPARATE-BUNDLES mode
     if args.separate_bundles:
         base         = args.base_url.rstrip("/")
@@ -761,6 +819,7 @@ Examples:
                     except ValueError as exc:
                         print(f"  Failed: {exc}", file=sys.stderr)
                 _download_patent_pdf()
+                _download_index_of_claims()
             sys.exit(0)
 
         # Text output
@@ -808,6 +867,7 @@ Examples:
             print()
         if args.download:
             _download_patent_pdf()
+            _download_index_of_claims()
         sys.exit(0)
 
     # ================================================================== DEFAULT: 3-bundle mode
@@ -843,6 +903,7 @@ Examples:
                 if b["documents"]:
                     _download_three(b)
             _download_patent_pdf()
+            _download_index_of_claims()
         sys.exit(0)
 
     # Text output
@@ -877,3 +938,4 @@ Examples:
 
     if args.download:
         _download_patent_pdf()
+        _download_index_of_claims()

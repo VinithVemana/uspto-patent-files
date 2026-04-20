@@ -100,7 +100,8 @@ Document codes are bucketed into these sets (see module-level constants):
 | `GET /resolve/{number}` | Resolve patent grant number → application number (e.g. `US10902286` → `16123456`) |
 | `GET /bundles/{app_no}` | Metadata + all bundles (JSON) |
 | `GET /bundles/{app_no}/{index}/pdf` | Merged PDF for one bundle (streaming) |
-| `GET /bundles/{app_no}/all.zip` | ZIP of all bundle PDFs (streaming) |
+| `GET /bundles/{app_no}/all.zip` | ZIP of all bundle PDFs + Index_of_claims.pdf + patent PDF (streaming) |
+| `GET /bundles/{app_no}/index-of-claims.pdf` | Merged PDF of all FWCLM (Index of Claims) documents |
 | `GET /bundles/{app_no}/patent.pdf` | Full granted patent PDF from Google Patents |
 
 Query params on bundle endpoints: `show_extra` (bool), `show_intclaim` (bool).
@@ -117,6 +118,7 @@ All endpoints and the CLI accept a USPTO **application number** (e.g. `16123456`
 - `resolve_application_number(number, force_patent)` — full input resolver; handles all formats (see Input Formats below)
 - `get_patent_pdf_url(patent_number)` — scrapes Google Patents CDN URL for granted patent PDF
 - `_merge_bundle_pdfs(bundle, ...)` — fetches individual doc PDFs and merges via PyPDF2 with bookmarks
+- `_merge_fwclm_pdf(bundles)` — collects all FWCLM docs across all bundles, merges into one PDF (raises ValueError if none found)
 
 ### Input Formats
 
