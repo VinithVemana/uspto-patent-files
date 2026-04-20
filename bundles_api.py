@@ -259,35 +259,68 @@ def resolve_application_number(number: str, force_patent: bool = False) -> str:
     return digits
 
 
+GOOGLE_PATENTS_HEADERS = {
+    # A bare "Mozilla/5.0" UA is a known bot fingerprint and gets served a
+    # 503 "We're sorry... automated queries" page. A full Chrome UA plus the
+    # Accept* headers a real browser sends gets HTTP 200.
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/129.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+}
+
+
 def get_patent_pdf_url(patent_number: str) -> str | None:
     """
     Look up the full granted patent PDF URL from Google Patents.
 
-    Fetches the Google Patents page for US{patent_number} and extracts the
-    direct CDN link from patentimages.storage.googleapis.com.
-
-    Returns the URL string, or None if the patent is not found / not yet
-    available on Google Patents.
+    Retries each kind code up to 3 times with exponential backoff, and
+    logs the actual failure reason (status code or exception) to stderr
+    so transient bot-block 503s don't look identical to a real 404.
     """
+    pdf_regex = (
+        r"patentimages\.storage\.googleapis\.com/"
+        r"([a-f0-9/]+/US" + re.escape(patent_number) + r"\.pdf)"
+    )
     for kind_code in ["B2", "B1", ""]:
         gp_url = f"https://patents.google.com/patent/US{patent_number}{kind_code}/en"
-        try:
-            r = requests.get(
-                gp_url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=15,
-            )
-            if r.status_code != 200:
-                continue
-            matches = re.findall(
-                r"patentimages\.storage\.googleapis\.com/"
-                r"([a-f0-9/]+/US" + re.escape(patent_number) + r"\.pdf)",
-                r.text,
-            )
-            if matches:
-                return f"https://patentimages.storage.googleapis.com/{matches[0]}"
-        except Exception:
-            continue
+        for attempt in range(3):
+            try:
+                r = requests.get(gp_url, headers=GOOGLE_PATENTS_HEADERS, timeout=15)
+                if r.status_code == 404:
+                    break  # try next kind code
+                if r.status_code == 429 or 500 <= r.status_code < 600:
+                    print(
+                        f"    Google Patents {r.status_code} for "
+                        f"US{patent_number}{kind_code} (attempt {attempt + 1}/3)",
+                        file=sys.stderr,
+                    )
+                    if attempt < 2:
+                        time.sleep((attempt + 1) * 2)
+                        continue
+                    break
+                if r.status_code != 200:
+                    break
+                matches = re.findall(pdf_regex, r.text)
+                if matches:
+                    return f"https://patentimages.storage.googleapis.com/{matches[0]}"
+                break  # page loaded but no PDF link — don't retry
+            except requests.RequestException as exc:
+                print(
+                    f"    Google Patents error for US{patent_number}{kind_code} "
+                    f"(attempt {attempt + 1}/3): {exc}",
+                    file=sys.stderr,
+                )
+                if attempt < 2:
+                    time.sleep((attempt + 1) * 2)
+                    continue
     return None
 
 
@@ -692,23 +725,30 @@ def _load_manifest(output_dir: str) -> dict:
         return {}
 
 
-def _save_manifest(output_dir: str, app_no: str, artifacts: dict) -> None:
-    """Persist artifact fingerprints so the next run can skip unchanged files."""
+def _save_manifest(
+    output_dir: str, app_no: str, artifacts: dict, failures: list | None = None
+) -> None:
+    """
+    Persist artifact fingerprints so the next run can skip unchanged files.
+
+    Only entries that actually landed on disk (i.e. whose download succeeded)
+    should be passed in ``artifacts``. Failed downloads go into ``failures``
+    so the user can see what's missing and the next run re-attempts them.
+    """
     path = os.path.join(output_dir, MANIFEST_FILE)
+    payload: dict = {
+        "app_no":    app_no,
+        "saved_at":  datetime.utcnow().isoformat(),
+        "artifacts": {
+            k: {"filename": v["filename"], "fingerprint": v["fingerprint"]}
+            for k, v in artifacts.items()
+            if "filename" in v and "fingerprint" in v
+        },
+    }
+    if failures:
+        payload["failures"] = failures
     with open(path, "w") as fh:
-        json.dump(
-            {
-                "app_no":    app_no,
-                "saved_at":  datetime.utcnow().isoformat(),
-                "artifacts": {
-                    k: {"filename": v["filename"], "fingerprint": v["fingerprint"]}
-                    for k, v in artifacts.items()
-                    if "filename" in v and "fingerprint" in v
-                },
-            },
-            fh,
-            indent=2,
-        )
+        json.dump(payload, fh, indent=2)
 
 
 def _needs_download(
@@ -814,34 +854,37 @@ Examples:
     output_dir      = args.output_dir if args.output_dir is not None else app_no
     manifest        = _load_manifest(output_dir) if args.download else {}
     _artifact_state: dict = {}
+    _failures:       list = []
 
-    def _download_patent_pdf() -> None:
-        """Download the full granted patent PDF (patent.pdf) if the app has been granted."""
+    def _download_patent_pdf() -> tuple[bool, str]:
+        """Return (success, reason_if_failed)."""
         patent_no = meta.get("patent_number")
         if not patent_no:
             print("  (no patent number — application not yet granted, skipping patent.pdf)",
                   file=sys.stderr)
-            return
+            return False, "no patent number"
         filename = f"US{patent_no}.pdf"
         filepath = os.path.join(output_dir, filename)
         print(f"  Fetching full patent PDF for US{patent_no} ...", file=sys.stderr)
         pdf_url = get_patent_pdf_url(patent_no)
         if not pdf_url:
             print(f"  Patent PDF not found on Google Patents for US{patent_no}", file=sys.stderr)
-            return
+            return False, "PDF URL not found on Google Patents (may be bot-blocked)"
         try:
-            r = requests.get(pdf_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=60, stream=True)
+            r = requests.get(pdf_url, headers=GOOGLE_PATENTS_HEADERS, timeout=60, stream=True)
             r.raise_for_status()
             with open(filepath, "wb") as fh:
                 for chunk in r.iter_content(chunk_size=65536):
                     fh.write(chunk)
             size_kb = os.path.getsize(filepath) // 1024
             print(f"  Saved {filename} ({size_kb:,} KB)  <-  {pdf_url}", file=sys.stderr)
+            return True, ""
         except Exception as exc:
             print(f"  Failed to download patent PDF: {exc}", file=sys.stderr)
+            return False, f"download error: {exc}"
 
-    def _download_index_of_claims() -> None:
-        """Download all FWCLM docs merged into Index_of_claims.pdf."""
+    def _download_index_of_claims() -> tuple[bool, str]:
+        """Return (success, reason_if_failed)."""
         filepath = os.path.join(output_dir, "Index_of_claims.pdf")
         print("  Fetching Index of Claims (FWCLM) ...", file=sys.stderr)
         try:
@@ -850,8 +893,13 @@ Examples:
                 fh.write(pdf.getvalue())
             size_kb = os.path.getsize(filepath) // 1024
             print(f"  Saved Index_of_claims.pdf ({size_kb:,} KB)", file=sys.stderr)
+            return True, ""
         except ValueError as exc:
             print(f"  Index of Claims not available: {exc}", file=sys.stderr)
+            return False, f"merge failed: {exc}"
+        except Exception as exc:
+            print(f"  Index of Claims write failed: {exc}", file=sys.stderr)
+            return False, f"write error: {exc}"
 
     # ------------------------------------------------------------------
     # Manifest-aware download wrappers — each checks whether the artifact
@@ -861,6 +909,16 @@ Examples:
     # _needs_download. _finalize_manifest() handles the rest automatically.
     # ------------------------------------------------------------------
 
+    def _record_skip(key: str, filename: str, fp: str) -> None:
+        """Carry a prior-successful artifact forward unchanged (skip path)."""
+        _artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+
+    def _record_success(key: str, filename: str, fp: str) -> None:
+        _artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
+
+    def _record_failure(key: str, filename: str, reason: str) -> None:
+        _failures.append({"key": key, "filename": filename, "reason": reason})
+
     def _download_sep_bundle_smart(bundle: dict, safe: str) -> None:
         key      = f"sep_bundle_{bundle['index']}"
         filename = f"{safe}.pdf"
@@ -868,8 +926,8 @@ Examples:
                                 args.show_extra, args.show_intclaim)
         fp       = _doc_fingerprint(docs) if docs else ""
         needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
-        _artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": needed}
         if not needed:
+            _record_skip(key, filename, fp)
             print(f"    [{filename}] up-to-date — skipped", file=sys.stderr)
             return
         print(f"    [{filename}] {reason} — downloading", file=sys.stderr)
@@ -880,8 +938,13 @@ Examples:
                 fh.write(pdf.getvalue())
             size_kb = os.path.getsize(filepath) // 1024
             print(f"    -> Saved ({size_kb:,} KB)", file=sys.stderr)
+            _record_success(key, filename, fp)
         except ValueError as exc:
             print(f"    -> Failed: {exc}", file=sys.stderr)
+            _record_failure(key, filename, f"merge failed: {exc}")
+        except Exception as exc:
+            print(f"    -> Failed: {exc}", file=sys.stderr)
+            _record_failure(key, filename, f"write error: {exc}")
 
     def _download_patent_pdf_smart() -> None:
         patent_no = meta.get("patent_number")
@@ -892,14 +955,16 @@ Examples:
         filename       = f"US{patent_no}.pdf"
         needed, reason = _needs_download("patent_pdf", filename, patent_no,
                                          manifest, output_dir)
-        _artifact_state["patent_pdf"] = {
-            "filename": filename, "fingerprint": patent_no, "needed": needed,
-        }
         if not needed:
+            _record_skip("patent_pdf", filename, patent_no)
             print(f"  [US{patent_no}.pdf] up-to-date — skipped", file=sys.stderr)
             return
         print(f"  [US{patent_no}.pdf] {reason} — downloading", file=sys.stderr)
-        _download_patent_pdf()
+        ok, fail_reason = _download_patent_pdf()
+        if ok:
+            _record_success("patent_pdf", filename, patent_no)
+        else:
+            _record_failure("patent_pdf", filename, fail_reason)
 
     def _download_index_smart() -> None:
         fwclm_docs = [
@@ -910,22 +975,31 @@ Examples:
         fp             = _doc_fingerprint(fwclm_docs)
         needed, reason = _needs_download("index_of_claims", "Index_of_claims.pdf",
                                          fp, manifest, output_dir)
-        _artifact_state["index_of_claims"] = {
-            "filename": "Index_of_claims.pdf", "fingerprint": fp, "needed": needed,
-        }
         if not needed:
+            _record_skip("index_of_claims", "Index_of_claims.pdf", fp)
             print("  [Index_of_claims.pdf] up-to-date — skipped", file=sys.stderr)
             return
         print(f"  [Index_of_claims.pdf] {reason} — downloading", file=sys.stderr)
-        _download_index_of_claims()
+        ok, fail_reason = _download_index_of_claims()
+        if ok:
+            _record_success("index_of_claims", "Index_of_claims.pdf", fp)
+        else:
+            _record_failure("index_of_claims", "Index_of_claims.pdf", fail_reason)
 
     def _finalize_manifest() -> None:
-        if not _artifact_state:
+        if not _artifact_state and not _failures:
             return
         downloaded = sum(1 for v in _artifact_state.values() if v.get("needed"))
-        skipped    = len(_artifact_state) - downloaded
-        _save_manifest(output_dir, app_no, _artifact_state)
-        print(f"\nSummary: {downloaded} downloaded, {skipped} skipped.", file=sys.stderr)
+        skipped    = sum(1 for v in _artifact_state.values() if not v.get("needed"))
+        failed     = len(_failures)
+        _save_manifest(output_dir, app_no, _artifact_state, _failures)
+        summary = f"\nSummary: {downloaded} downloaded, {skipped} skipped"
+        if failed:
+            summary += f", {failed} failed"
+            for f in _failures:
+                summary += f"\n  - {f['filename']}: {f['reason']}"
+        summary += "."
+        print(summary, file=sys.stderr)
 
     # ================================================================== SEPARATE-BUNDLES mode
     if args.separate_bundles:
