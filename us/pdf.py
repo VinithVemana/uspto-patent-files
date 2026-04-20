@@ -12,6 +12,7 @@ from PyPDF2 import PdfWriter
 
 from .config import HEADERS, GOOGLE_PATENTS_HEADERS
 from .bundles import _filter_docs
+from .client import _get_documents
 
 
 def get_patent_pdf_url(patent_number: str) -> str | None:
@@ -99,18 +100,18 @@ def _merge_bundle_pdfs(
     return out
 
 
-def _merge_fwclm_pdf(bundles: list) -> io.BytesIO:
+def _merge_fwclm_pdf(app_no: str) -> io.BytesIO:
     """
-    Collect all FWCLM (Index of Claims) docs across all prosecution bundles,
-    merge their PDFs in date order, and return the merged BytesIO.
+    Fetch all FWCLM (Index of Claims) docs for the application directly from
+    the raw document list and return the most recent one as a BytesIO PDF.
     Raises ValueError when no FWCLM docs are found or none could be fetched.
     """
+    all_docs = _get_documents(app_no)
     seen, fwclm_docs = set(), []
-    for b in bundles:
-        for doc in b["documents"]:
-            if doc["code"] == "FWCLM" and doc.get("pdf_url") and doc["pdf_url"] not in seen:
-                seen.add(doc["pdf_url"])
-                fwclm_docs.append(doc)
+    for doc in all_docs:
+        if doc["code"] == "FWCLM" and doc.get("pdf_url") and doc["pdf_url"] not in seen:
+            seen.add(doc["pdf_url"])
+            fwclm_docs.append(doc)
     fwclm_docs.sort(key=lambda d: d["date"])
 
     if not fwclm_docs:

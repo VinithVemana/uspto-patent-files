@@ -292,7 +292,7 @@ def download_index_of_claims(application_number: str):
         raise HTTPException(status_code=404, detail="No documents found for this application")
 
     try:
-        pdf = _merge_fwclm_pdf(bundles)
+        pdf = _merge_fwclm_pdf(app_no)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -344,7 +344,7 @@ def download_all_bundles_zip(application_number: str):
 
         # Index of Claims PDF — mirrors CLI _download_index_of_claims()
         try:
-            fwclm_pdf = _merge_fwclm_pdf(bundles)
+            fwclm_pdf = _merge_fwclm_pdf(app_no)
             zf.writestr("Index_of_claims.pdf", fwclm_pdf.getvalue())
         except (ValueError, Exception):
             pass   # best effort — skip if no FWCLM docs

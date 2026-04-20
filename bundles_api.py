@@ -166,7 +166,7 @@ Examples:
         filepath = os.path.join(output_dir, "Index_of_claims.pdf")
         print("  Fetching Index of Claims (FWCLM) ...", file=sys.stderr)
         try:
-            pdf = _merge_fwclm_pdf(bundles)
+            pdf = _merge_fwclm_pdf(app_no)
             with open(filepath, "wb") as fh:
                 fh.write(pdf.getvalue())
             size_kb = os.path.getsize(filepath) // 1024
@@ -234,7 +234,7 @@ Examples:
             _record_failure("patent_pdf", filename, fail_reason)
 
     def _download_index_smart() -> None:
-        fwclm_docs = [d for b in bundles for d in b["documents"] if d["code"] == "FWCLM"]
+        fwclm_docs = [d for d in _get_documents(app_no) if d["code"] == "FWCLM"]
         if not fwclm_docs:
             return
         fp             = _doc_fingerprint(fwclm_docs)
