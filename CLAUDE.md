@@ -8,8 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 uvicorn bundles_server:app --host 0.0.0.0 --port 7901
 ```
+Serves USPTO routes (`/bundles/*`, `/resolve/*`) and EP routes (`/ep/bundles/*`, `/ep/resolve/*`).
 
-**CLI:**
+**USPTO CLI** — `bundles_api.py` (see also the EP CLI section below):
 ```bash
 # By application number
 python bundles_api.py 16123456
@@ -34,6 +35,30 @@ python bundles_api.py US20210367709A1     # publication kind code A1/A2/A9 → p
 --text                 # print human-readable table instead of JSON
 ```
 
+**EP CLI** — `bundles_api_ep.py`:
+```bash
+python bundles_api_ep.py EP2985974                 # JSON, 3-bundle mode
+python bundles_api_ep.py EP2985974 --text          # human-readable
+python bundles_api_ep.py EP2985974 --list-docs     # dry-run: every doc + classification
+python bundles_api_ep.py EP2985974 --download      # merged PDFs to ./EP{app}/
+python bundles_api_ep.py EP2985974 --separate-bundles --download
+python bundles_api_ep.py 10173239                  # bare EP app number
+python bundles_api_ep.py EP3456789B1               # kind code stripped
+python bundles_api_ep.py WO2015077217              # PCT/WO → best-effort EP family lookup
+
+# EP-specific flags (mirrors USPTO where applicable):
+--list-docs            # dry-run listing of every doc + tier + procedure — NO download
+--show-extra           # include supporting admin docs (delivery notes, receipts, minutes)
+--show-intclaim        # include intermediate claim docs inside round bundles
+--download / --separate-bundles / --output-dir / --text / --base-url — same as USPTO
+```
+
+**EP credentials** — register at developers.epo.org and add to `.env`:
+```
+EPO_CLIENT_ID=...
+EPO_CLIENT_SECRET=...
+```
+
 ## Dependencies
 
 ```
@@ -41,6 +66,9 @@ fastapi
 uvicorn
 requests
 PyPDF2
+beautifulsoup4      # EP only — parses register.epo.org doclist HTML
+tqdm                # EP only — progress bars during multi-doc PDF downloads
+python-dotenv       # loads USPTO_API_KEY and EPO_CLIENT_ID/SECRET
 ```
 
 No `requirements.txt` exists — install manually.
@@ -133,6 +161,52 @@ All CLI args and API path params accept:
 | `US20210367709A1` | `US` prefix + publication kind code (A1/A2/A9) → publication lookup |
 | `11973593` | try application number; if not found, try patent lookup |
 | `11973593 --patent` | force patent lookup (skips application number check) |
+
+## EP Architecture (`ep/` module)
+
+EP uses a separate data flow because EPO OPS does NOT expose prosecution PDFs — those live on `register.epo.org` behind Cloudflare.
+
+```
+Input (EP app / EP pub / WO-PCT)
+  → ep.resolver.resolve()                    # normalize + publication→app via OPS register biblio
+  → ep.ops_client.get_publication_biblio()   # OAuth2 biblio metadata (title, inventors, IPC)
+  → ep.register_client.RegisterSession       # warm Cloudflare session on doclist page
+      .list_documents()                      # BeautifulSoup parse of doclist HTML
+  → ep.bundles.build_prosecution_bundles()   # group by procedure + round
+  → ep.bundles.build_three_bundles()         # collapse to {initial, middle, granted}
+  → ep.pdf.merge_bundle_pdfs(session, ...)   # session-based PDF fetch + PyPDF2 merge
+```
+
+### `ep/` module files
+
+| File | Purpose |
+|---|---|
+| `config.py` | **User-editable** doc-type → tier classifications (OA_TRIGGER_TYPES, RESPONSE_TYPES, SEARCH_TYPES, FILING_TYPES, GRANT_TYPES, REFUSAL_TYPES, EXTRA_TYPES). `classify()` uses precedence: EXTRA→OA→RESP→GRANT→REFUSE→SEARCH→FILING→FILING_EXACT→extra. Also exports `short_code()` for 4-6 char display/filename codes. |
+| `auth.py` | Thread-safe OAuth2 token cache for OPS. Refreshes 60 s before expiry (tokens live 1200 s). Reads `EPO_CLIENT_ID` / `EPO_CLIENT_SECRET` from `.env`. |
+| `ops_client.py` | OPS API: `get_publication_biblio()`, `get_register_biblio()`, `extract_metadata()`, `extract_application_number()`. Strips EP prefix from epodoc doc-numbers; converts YYYYMMDD dates to ISO. |
+| `register_client.py` | `RegisterSession`: warms session cookies on doclist page, parses table rows (input[name=identivier].value is the documentId), fetches PDFs via `showPdfPage=1&documentId=...&appnumber=EP...&proc=`. Re-warms and retries once if a PDF response isn't `%PDF-`. |
+| `resolver.py` | Input normalization + EP/WO/PCT → application-number resolution. 7-digit numbers tried as publication first; 8-digit as application. |
+| `bundles.py` | Bundle builder. `_is_oa_trigger()` restricts to `Search / examination` procedure so PCT-phase docs don't accidentally trigger rounds. Initial bundle collects: (1) all ISA/RO/Ch.2 docs regardless of date, (2) Search/exam docs before the first OA. |
+| `pdf.py` | `merge_bundle_pdfs(session, bundle, app_no, ...)` uses the shared RegisterSession so Cloudflare cookies persist. `doc_fingerprint()` for manifest skip-unchanged logic. |
+
+### EP bundle types (mirrors USPTO shape)
+
+| Bundle | Contents |
+|---|---|
+| **Initial / International** (type=`initial`) | Filing docs + ESR/ESO (direct-EP) OR WOISA + ISR + IPER (PCT-route) + pre-exam amendments |
+| **Round N** (type=`round` / `final_round`) | Each "Communication from the Examining Division" OR "Summons to oral proceedings" + applicant responses + amended claims (all Search/exam docs between anchor and next OA) |
+| **Granted** (type=`granted`) | "Intention to grant" + "Decision to grant" — OR a Refused bundle if application was refused |
+
+3-bundle collapse mirrors USPTO: `initial.pdf`, `{RESP-OA-...}.pdf` (middle-filename built from `_MIDDLE_CODE_ORDER = ["RESP","OA","SUMMON","GRANT","REFUSE"]`), `granted_claims.pdf`.
+
+### EP API endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /ep/resolve/{number}` | Resolve EP/WO → `{application_number, publication_number}` |
+| `GET /ep/bundles/{number}` | Metadata + 3 bundles (JSON). Query params: `show_extra`, `show_intclaim` |
+| `GET /ep/bundles/{number}/{index}/pdf` | Streamed merged PDF for one bundle |
+| `GET /ep/bundles/{number}/all.zip` | ZIP of all 3 bundle PDFs |
 
 ## Mistakes Log
 

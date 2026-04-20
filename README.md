@@ -1,4 +1,4 @@
-# Patent Prosecution Bundles API — USPTO Patent File Wrapper
+# Patent Prosecution Bundles API — USPTO + EP Patent File Wrapper
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.x-3776ab?style=for-the-badge" />
@@ -11,8 +11,8 @@
 </p>
 
 <p align="center">
-A standalone CLI and FastAPI web server that retrieves USPTO patent prosecution history, classifies documents into logical prosecution bundles, merges them into downloadable PDFs, and serves them via streaming REST endpoints.<br/>
-<strong>bundles_api.py</strong> — core logic + CLI &nbsp;|&nbsp; <strong>bundles_server.py</strong> — FastAPI hosting layer
+A standalone CLI and FastAPI web server that retrieves USPTO <strong>and EP (European Patent)</strong> prosecution history, classifies documents into logical prosecution bundles, merges them into downloadable PDFs, and serves them via streaming REST endpoints.<br/>
+<strong>bundles_api.py</strong> — USPTO CLI &nbsp;|&nbsp; <strong>bundles_api_ep.py</strong> — EP CLI &nbsp;|&nbsp; <strong>bundles_server.py</strong> — FastAPI hosting layer &nbsp;|&nbsp; <strong>ep/</strong> — EP module (config / auth / OPS / register / bundles)
 </p>
 
 ---
@@ -32,6 +32,7 @@ A standalone CLI and FastAPI web server that retrieves USPTO patent prosecution 
   - [Step 7: get_patent_pdf_url](#step-7-get_patent_pdf_url)
 - [Appendix A — Document Classification Codes](#appendix-a--document-classification-codes)
 - [Appendix B — Bundle Types and Visibility Tiers](#appendix-b--bundle-types-and-visibility-tiers)
+- [EP (European Patent) Support](#-ep-european-patent-support) — OPS OAuth2 + register.epo.org scraping + PCT-route handling
 
 ---
 
@@ -433,5 +434,163 @@ The following document code sets govern how documents are classified into bundle
 | `default` | ✅ | — | — | CTNF, CTFR, NOA, ISSUE.NOT, REM; CLM in `initial`/`granted` bundles |
 | `intclaim` | ❌ | `--show-intclaim` | `show_intclaim=true` | CLM docs inside `round` / `final_round` bundles |
 | `extra` | ❌ | `--show-extra` | `show_extra=true` | OA support (892, FWCLM, SRFW, SRNT), AMND variants, CTAV, RCE, AFCP variants |
+
+---
+
+## 🇪🇺 EP (European Patent) Support
+
+Same pipeline, same bundle shape, same CLI ergonomics — adapted for the European Patent Office. EP uses two data sources:
+
+| Source | Purpose |
+|:---|:---|
+| **EPO OPS** (`ops.epo.org`) | OAuth2 bibliographic data (title, inventors, IPC) + app-number resolution |
+| **EPO Register** (`register.epo.org`) | Document list + prosecution PDFs (scraped, session-based) |
+
+The OPS API does **not** expose prosecution PDFs, so the register website is scraped behind a Cloudflare session. Each run warms the session once and reuses the same `JSESSIONID` + `__cf_bm` cookies for every PDF download.
+
+### Setup
+
+Register at [developers.epo.org](https://developers.epo.org), create an app, then add the credentials to `.env`:
+
+```bash
+EPO_CLIENT_ID=your_consumer_key
+EPO_CLIENT_SECRET=your_consumer_secret
+```
+
+Extra dependencies beyond the USPTO set:
+
+```bash
+pip install beautifulsoup4 tqdm
+```
+
+### CLI usage
+
+```bash
+# 3-bundle mode (default) — JSON output
+python bundles_api_ep.py EP2985974
+
+# Human-readable text listing
+python bundles_api_ep.py EP2985974 --text
+
+# Dry-run: show every document + classification without downloading or bundling.
+# Use this to verify which docs will land in which bundle before committing.
+python bundles_api_ep.py EP2985974 --list-docs
+
+# Download all 3 bundles as merged PDFs
+python bundles_api_ep.py EP2985974 --download --output-dir ./ep_pdfs
+
+# One PDF per prosecution round
+python bundles_api_ep.py EP2985974 --separate-bundles --download
+
+# Include supporting admin docs (delivery notes, receipts, minutes, oral-proc prep)
+python bundles_api_ep.py EP2985974 --show-extra --text
+
+# Include intermediate claim docs filed during prosecution
+python bundles_api_ep.py EP2985974 --show-intclaim --text
+
+# Different input formats
+python bundles_api_ep.py 10173239                 # bare EP application number
+python bundles_api_ep.py EP10173239.4             # check digit stripped
+python bundles_api_ep.py EP3456789B1              # kind code stripped
+python bundles_api_ep.py WO2015077217             # best-effort PCT/WO → EP lookup
+```
+
+### Input formats accepted
+
+| Input | What happens |
+|:---|:---|
+| `EP2420929` | EP publication number → OPS register biblio → app `EP10173239` |
+| `EP3456789A1` / `B1` | kind code stripped → treated as publication number |
+| `10173239` | 8-digit EP application number (used directly) |
+| `EP10173239.4` | check digit stripped → `EP10173239` |
+| `WO2015077217` | PCT/WO publication → OPS family lookup → EP app (best-effort) |
+| `PCT/US2020/012345` | PCT application reference stripped to digits |
+
+### PCT-route (international phase) support
+
+For PCT-route EP patents, the **Initial / International** bundle automatically includes:
+
+- Filing documents (Claims, Description, Abstract, Drawings)
+- ISA Written Opinion (all parts — cover sheet, boxes I-VIII, supplemental box)
+- Copy of the International Search Report (ISR)
+- International Preliminary Examination Report (IPER, Chapter II patents)
+- Request for entry into the European phase
+- Pre-examination amendments (Art.19, Art.34, pre-exam)
+
+Direct-filed EP patents get the European Search Report + Search Opinion in the initial bundle instead. Everything after "Communication from the Examining Division" goes into the prosecution rounds; "Intention to grant" + "Decision to grant" go into the final granted bundle.
+
+### API endpoints (EP)
+
+| Method | Endpoint | Description |
+|:---:|:---|:---|
+| `GET` | `/ep/resolve/{number}` | Resolve EP/WO number → application number |
+| `GET` | `/ep/bundles/{number}` | Metadata + 3-bundle prosecution view (JSON) |
+| `GET` | `/ep/bundles/{number}/{index}/pdf` | Merged PDF stream for one bundle |
+| `GET` | `/ep/bundles/{number}/all.zip` | ZIP of all 3 bundle PDFs |
+
+Query params `show_extra=true` and `show_intclaim=true` control document visibility tiers, same semantics as the USPTO endpoints.
+
+### Module layout
+
+```
+ep/
+├── config.py            ← DOCUMENT TYPE CLASSIFICATIONS — edit this file to
+│                          change what goes into each bundle
+├── auth.py              ← EPO OPS OAuth2 token manager (auto-refreshes every 20 min)
+├── ops_client.py        ← OPS API: biblio, register biblio, procedural-steps
+├── register_client.py   ← register.epo.org scraper (session + doclist + PDFs)
+├── resolver.py          ← EP pub / WO-PCT → app-number resolution
+├── bundles.py           ← prosecution bundle builder + 3-bundle collapse
+├── pdf.py               ← session-aware PDF merging (PyPDF2 + bookmarks)
+└── __init__.py
+```
+
+### Customising what gets downloaded
+
+Document classifications live in **[`ep/config.py`](ep/config.py)**. Unlike USPTO's short codes (CTNF, REM, ...), EPO Register documents have English text titles. The config uses **case-insensitive substring matching** against these titles.
+
+To change how a doc type is classified, edit the relevant set:
+
+```python
+OA_TRIGGER_TYPES  = {...}   # Start a new prosecution round
+RESPONSE_TYPES    = {...}   # Applicant responses (close a round)
+SEARCH_TYPES      = {...}   # ESR / ESO / ISR / WOISA / IPER
+FILING_TYPES      = {...}   # Filing application docs
+GRANT_TYPES       = {...}   # Intention to grant + decision to grant
+REFUSAL_TYPES     = {...}   # Decision to refuse
+EXTRA_TYPES       = {...}   # Supporting admin (delivery, receipts, minutes, …)
+```
+
+After editing, run `--list-docs` to verify the new classification before downloading:
+
+```bash
+python bundles_api_ep.py EP2985974 --list-docs
+# Shows: Date | Code | Tier | Procedure | Type — for every document
+```
+
+### EP document short codes (auto-derived from type)
+
+| Code | Classified as | Triggered by (substring match) |
+|:---:|:---|:---|
+| `ESR` / `EESR` / `SESR` | SEARCH | European / Extended / Supplementary European search report |
+| `ESO` | SEARCH | European search opinion |
+| `ISR` / `WOISA` / `IPER` | SEARCH | International Search Report, Written Opinion of ISA, Int'l Preliminary Exam Report |
+| `OA` / `SUMMON` | OA_TRIGGER | Communication from the Examining Division; Summons to oral proceedings |
+| `RESP` / `AMND` | RESPONSE | Reply to communication; Amended claims / description |
+| `GRANT` | GRANT | Intention to grant; Decision to grant; Mention of the grant |
+| `REFUSE` | REFUSAL | Decision to refuse; Application deemed to be withdrawn |
+| `CLM` / `DESC` / `ABS` / `DRW` | FILING_EXACT | Claims / Description / Abstract / Drawings (exact match) |
+| `FILE` | FILING | Request for grant of a European patent; Request for entry into European phase |
+| `MISC` | EXTRA | Everything else (delivery notes, receipts, fees, admin) |
+
+### Key differences from the USPTO pipeline
+
+| Aspect | USPTO | EPO |
+|:---|:---|:---|
+| Auth | Static API key (header) | OAuth2 (token exchange, auto-refresh every 20 min) |
+| PDF delivery | Direct PDF URLs via API | Session-cookie flow on register.epo.org (Cloudflare-protected) |
+| Doc identification | Short codes (CTNF, REM, NOA, …) | English text titles (substring-matched via `ep/config.py`) |
+| Number formats | App number, US grant, US pub | EP app, EP pub (A1/B1), WO/PCT publication |
+| PCT handling | N/A | Dedicated "International Searching Authority" + "PCT Chapter 2" procedure phases surface in the Initial bundle |
 
 ---

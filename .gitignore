@@ -9,5 +9,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+# EP downloaded patent PDF artifacts (EP{digits} directories)
+EP[0-9]*/
+
+# Playwright MCP cache (artifact from research session)
+.playwright-mcp/
+
 # macOS
 .DS_Store

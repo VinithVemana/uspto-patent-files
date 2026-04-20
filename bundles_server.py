@@ -45,6 +45,29 @@ GET /bundles/{application_number}/patent.pdf
 Note: all /bundles/* and /resolve/* endpoints accept patent grant numbers
 (e.g. US10902286) or pre-grant publication numbers (e.g. US20210367709A1)
 in addition to application numbers.
+
+
+EP (European Patent) ENDPOINTS
+------------------------------
+All EP endpoints live under /ep/ and accept the same input formats the CLI does:
+  EP application number    EP10173239  or  10173239
+  EP publication number    EP3456789   or  EP3456789B1
+  PCT / WO publication     WO2015077217  (best-effort EP family lookup)
+
+GET /ep/resolve/{number}
+  Resolve any input to an EP application number + publication number.
+
+GET /ep/bundles/{number}
+  Metadata + 3-bundle prosecution view (JSON).
+  Query params:
+    show_extra=true       Include supporting admin docs
+    show_intclaim=true    Include intermediate claim docs in round bundles
+
+GET /ep/bundles/{number}/{bundle_index}/pdf
+  Stream a merged PDF for one of the 3 bundles.
+
+GET /ep/bundles/{number}/all.zip
+  Stream a ZIP of all 3 bundle PDFs.
 """
 
 import io
@@ -65,6 +88,13 @@ from bundles_api import (
     _merge_fwclm_pdf,
     HEADERS,
 )
+
+# --- EP module ---
+from ep import bundles as ep_bundles
+from ep import ops_client as ep_ops_client
+from ep import pdf as ep_pdf
+from ep import resolver as ep_resolver
+from ep.register_client import RegisterSession
 
 # ---------------------------------------------------------------------------
 # App
@@ -345,4 +375,187 @@ def download_all_bundles_zip(application_number: str):
         zip_buf,
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{app_no}_bundles.zip"'},
+    )
+
+
+# ===========================================================================
+# EP (European Patent) routes
+# ===========================================================================
+#
+# Mirrors the USPTO routes under an /ep/ prefix. EP prosecution documents
+# live on register.epo.org (not OPS), so each endpoint opens a short-lived
+# RegisterSession to warm Cloudflare cookies and scrape the document list.
+#
+# Accepts the same input formats the CLI does:
+#   EP application number    EP10173239  or  10173239
+#   EP publication number    EP3456789   or  EP3456789B1
+#   PCT / WO publication     WO2015077217  (best-effort EP family lookup)
+# ===========================================================================
+
+
+def _resolve_ep_or_404(number: str) -> tuple[str, str | None]:
+    try:
+        return ep_resolver.resolve(number)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+def _fetch_ep_meta_and_docs(number: str):
+    """
+    Shared helper: resolve + fetch meta + document list.
+    Returns (app_no, pub_no, metadata_dict, documents_list, session).
+    Raises HTTPException on any failure.
+    """
+    app_no, pub_no = _resolve_ep_or_404(number)
+
+    pub_biblio = ep_ops_client.get_publication_biblio(f"EP{pub_no}") if pub_no else None
+    reg_biblio = ep_ops_client.get_register_biblio(f"EP{pub_no}") if pub_no else None
+    meta = (ep_ops_client.extract_metadata(pub_biblio, reg_biblio)
+            if pub_biblio else
+            {"application_number": app_no, "publication_number": pub_no,
+             "patent_number": None, "title": "N/A", "status": "N/A",
+             "filing_date": "", "publication_date": "", "grant_date": None,
+             "inventors": [], "applicants": [], "ipc_codes": []})
+    meta["application_number"] = app_no
+
+    session = RegisterSession()
+    try:
+        docs = session.list_documents(f"EP{app_no}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=f"EPO Register fetch failed: {e}")
+
+    if not docs:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No documents found in EPO Register for EP{app_no}",
+        )
+    return app_no, pub_no, meta, docs, session
+
+
+@app.get("/ep/resolve/{number}")
+def ep_resolve_number(number: str):
+    """
+    Resolve an EP publication / WO (PCT) number to an EP application number.
+
+    Examples:
+      /ep/resolve/EP3456789       → {"application_number": "10173239", ...}
+      /ep/resolve/EP3456789B1     → kind code stripped, same result
+      /ep/resolve/WO2015077217    → best-effort EP family lookup
+      /ep/resolve/10173239        → echoes back (already an app number)
+    """
+    app_no, pub_no = _resolve_ep_or_404(number)
+    return {
+        "input":              number,
+        "application_number": app_no,
+        "publication_number": pub_no,
+    }
+
+
+@app.get("/ep/bundles/{number}")
+def ep_get_bundles(number: str, request: Request,
+                   show_extra: bool = False, show_intclaim: bool = False):
+    """
+    Return EP application metadata + prosecution bundles (3-bundle mode).
+
+    Query params:
+      show_extra=true       Include supporting admin docs (delivery, receipts, minutes)
+      show_intclaim=true    Include intermediate claim docs inside round bundles
+
+    Collapses every prosecution round into 3 logical groups matching the CLI:
+      0 — initial.pdf          (filing + ESR/ISR + pre-exam amendments)
+      1 — {RESP-OA-...}.pdf    (all EP examination round docs, date-sorted)
+      2 — granted_claims.pdf   (intention to grant + decision)
+                               or refused.pdf if refused
+    """
+    app_no, pub_no, meta, docs, _ = _fetch_ep_meta_and_docs(number)
+
+    bundles_list = ep_bundles.build_prosecution_bundles(docs)
+    three        = ep_bundles.build_three_bundles(bundles_list)
+    base         = str(request.base_url).rstrip("/")
+
+    return {
+        **meta,
+        "bundles": [
+            {
+                "index":        i,
+                "label":        b["label"],
+                "filename":     b["filename"],
+                "type":         b["type"],
+                "download_url": f"{base}/ep/bundles/{app_no}/{i}/pdf",
+                "documents":    ep_bundles._filter_docs(
+                    b["documents"], show_extra=show_extra, show_intclaim=show_intclaim
+                ),
+            }
+            for i, b in enumerate(three)
+        ],
+    }
+
+
+@app.get("/ep/bundles/{number}/{bundle_index}/pdf")
+def ep_download_bundle_pdf(number: str, bundle_index: int,
+                           show_extra: bool = False, show_intclaim: bool = False):
+    """
+    Stream a merged PDF for one of the 3 EP prosecution bundles (indices 0–2).
+
+    Session cookies for register.epo.org are established per-request.
+    """
+    app_no, _, _, docs, session = _fetch_ep_meta_and_docs(number)
+    bundles_list = ep_bundles.build_prosecution_bundles(docs)
+    three        = ep_bundles.build_three_bundles(bundles_list)
+
+    if bundle_index < 0 or bundle_index >= len(three):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Bundle {bundle_index} not found (total: {len(three)})",
+        )
+    b = three[bundle_index]
+
+    try:
+        pdf = ep_pdf.merge_bundle_pdfs(
+            session, b, app_no,
+            show_extra=show_extra, show_intclaim=show_intclaim,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    filename = f"{b['filename']}.pdf"
+    return StreamingResponse(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/ep/bundles/{number}/all.zip")
+def ep_download_all_bundles_zip(number: str,
+                                show_extra: bool = False, show_intclaim: bool = False):
+    """
+    Stream a ZIP of all 3 EP bundle PDFs.
+
+    Matches the CLI's default-mode --download behavior.
+    """
+    app_no, _, _, docs, session = _fetch_ep_meta_and_docs(number)
+    bundles_list = ep_bundles.build_prosecution_bundles(docs)
+    three        = ep_bundles.build_three_bundles(bundles_list)
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for b in three:
+            if not b["documents"]:
+                continue
+            try:
+                pdf = ep_pdf.merge_bundle_pdfs(
+                    session, b, app_no,
+                    show_extra=show_extra, show_intclaim=show_intclaim,
+                )
+                zf.writestr(f"{b['filename']}.pdf", pdf.getvalue())
+            except ValueError:
+                # Bundle had no PDFs under current flags — skip
+                pass
+
+    zip_buf.seek(0)
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="EP{app_no}_bundles.zip"'},
     )
