@@ -116,6 +116,9 @@ def _merge_fwclm_pdf(bundles: list) -> io.BytesIO:
     if not fwclm_docs:
         raise ValueError("No FWCLM (Index of Claims) documents found")
 
+    # Use only the most recent FWCLM document
+    fwclm_docs = [fwclm_docs[-1]]
+
     merger = PdfWriter()
     count  = 0
     for doc in fwclm_docs:
