@@ -67,6 +67,8 @@ import re
 import io
 import os
 import time
+import hashlib
+import json
 
 import requests
 from PyPDF2 import PdfWriter
@@ -667,6 +669,74 @@ def _merge_fwclm_pdf(bundles: list) -> io.BytesIO:
 
 
 # ---------------------------------------------------------------------------
+# Download manifest — skip unchanged / add missing artifacts on re-runs
+# ---------------------------------------------------------------------------
+
+MANIFEST_FILE = "manifest.json"
+
+
+def _doc_fingerprint(docs: list) -> str:
+    """16-char SHA-256 of sorted (code, date, pdf_url) triples — detects document-set changes."""
+    key = "|".join(
+        sorted(f"{d['code']}_{d['date']}_{d.get('pdf_url', '')}" for d in docs)
+    )
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def _load_manifest(output_dir: str) -> dict:
+    path = os.path.join(output_dir, MANIFEST_FILE)
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_manifest(output_dir: str, app_no: str, artifacts: dict) -> None:
+    """Persist artifact fingerprints so the next run can skip unchanged files."""
+    path = os.path.join(output_dir, MANIFEST_FILE)
+    with open(path, "w") as fh:
+        json.dump(
+            {
+                "app_no":    app_no,
+                "saved_at":  datetime.utcnow().isoformat(),
+                "artifacts": {
+                    k: {"filename": v["filename"], "fingerprint": v["fingerprint"]}
+                    for k, v in artifacts.items()
+                    if "filename" in v and "fingerprint" in v
+                },
+            },
+            fh,
+            indent=2,
+        )
+
+
+def _needs_download(
+    key: str, filename: str, fingerprint: str, manifest: dict, output_dir: str
+) -> tuple[bool, str]:
+    """
+    Return (should_download, reason).
+
+    Downloads when:
+      - file is missing on disk
+      - artifact not tracked in manifest (e.g. newly added file type)
+      - filename changed (e.g. middle bundle gained a new OA code)
+      - fingerprint changed (documents updated since last run)
+    """
+    filepath = os.path.join(output_dir, filename)
+    if not os.path.exists(filepath):
+        return True, "missing"
+    prev = manifest.get("artifacts", {}).get(key)
+    if not prev:
+        return True, "not in manifest"
+    if prev.get("filename") != filename:
+        return True, f"renamed (was {prev['filename']})"
+    if prev.get("fingerprint") != fingerprint:
+        return True, "documents updated"
+    return False, "up-to-date"
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -741,7 +811,9 @@ Examples:
         print("No prosecution documents found.", file=sys.stderr)
         sys.exit(0)
 
-    output_dir = args.output_dir if args.output_dir is not None else app_no
+    output_dir      = args.output_dir if args.output_dir is not None else app_no
+    manifest        = _load_manifest(output_dir) if args.download else {}
+    _artifact_state: dict = {}
 
     def _download_patent_pdf() -> None:
         """Download the full granted patent PDF (patent.pdf) if the app has been granted."""
@@ -781,6 +853,80 @@ Examples:
         except ValueError as exc:
             print(f"  Index of Claims not available: {exc}", file=sys.stderr)
 
+    # ------------------------------------------------------------------
+    # Manifest-aware download wrappers — each checks whether the artifact
+    # has changed or is missing before calling the underlying download fn.
+    # Adding a new downloadable file type: just add a new _*_smart wrapper
+    # that registers a key + fingerprint in _artifact_state and guards with
+    # _needs_download. _finalize_manifest() handles the rest automatically.
+    # ------------------------------------------------------------------
+
+    def _download_sep_bundle_smart(bundle: dict, safe: str) -> None:
+        key      = f"sep_bundle_{bundle['index']}"
+        filename = f"{safe}.pdf"
+        docs     = _filter_docs(bundle["documents"], bundle["type"],
+                                args.show_extra, args.show_intclaim)
+        fp       = _doc_fingerprint(docs) if docs else ""
+        needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
+        _artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": needed}
+        if not needed:
+            print(f"    [{filename}] up-to-date — skipped", file=sys.stderr)
+            return
+        print(f"    [{filename}] {reason} — downloading", file=sys.stderr)
+        filepath = os.path.join(output_dir, filename)
+        try:
+            pdf = _merge_bundle_pdfs(bundle, args.show_extra, args.show_intclaim)
+            with open(filepath, "wb") as fh:
+                fh.write(pdf.getvalue())
+            size_kb = os.path.getsize(filepath) // 1024
+            print(f"    -> Saved ({size_kb:,} KB)", file=sys.stderr)
+        except ValueError as exc:
+            print(f"    -> Failed: {exc}", file=sys.stderr)
+
+    def _download_patent_pdf_smart() -> None:
+        patent_no = meta.get("patent_number")
+        if not patent_no:
+            print("  (no patent number — not yet granted, skipping patent.pdf)",
+                  file=sys.stderr)
+            return
+        filename       = f"US{patent_no}.pdf"
+        needed, reason = _needs_download("patent_pdf", filename, patent_no,
+                                         manifest, output_dir)
+        _artifact_state["patent_pdf"] = {
+            "filename": filename, "fingerprint": patent_no, "needed": needed,
+        }
+        if not needed:
+            print(f"  [US{patent_no}.pdf] up-to-date — skipped", file=sys.stderr)
+            return
+        print(f"  [US{patent_no}.pdf] {reason} — downloading", file=sys.stderr)
+        _download_patent_pdf()
+
+    def _download_index_smart() -> None:
+        fwclm_docs = [
+            d for b in bundles for d in b["documents"] if d["code"] == "FWCLM"
+        ]
+        if not fwclm_docs:
+            return
+        fp             = _doc_fingerprint(fwclm_docs)
+        needed, reason = _needs_download("index_of_claims", "Index_of_claims.pdf",
+                                         fp, manifest, output_dir)
+        _artifact_state["index_of_claims"] = {
+            "filename": "Index_of_claims.pdf", "fingerprint": fp, "needed": needed,
+        }
+        if not needed:
+            print("  [Index_of_claims.pdf] up-to-date — skipped", file=sys.stderr)
+            return
+        print(f"  [Index_of_claims.pdf] {reason} — downloading", file=sys.stderr)
+        _download_index_of_claims()
+
+    def _finalize_manifest() -> None:
+        if not _artifact_state:
+            return
+        downloaded = sum(1 for v in _artifact_state.values() if v.get("needed"))
+        skipped    = len(_artifact_state) - downloaded
+        _save_manifest(output_dir, app_no, _artifact_state)
+        print(f"\nSummary: {downloaded} downloaded, {skipped} skipped.", file=sys.stderr)
+
     # ================================================================== SEPARATE-BUNDLES mode
     if args.separate_bundles:
         base         = args.base_url.rstrip("/")
@@ -807,19 +953,11 @@ Examples:
                 for bundle, rb in zip(bundles, result_bundles):
                     if not rb["documents"]:
                         continue
-                    safe     = re.sub(r"[^\w\s\-]", "", bundle["label"]).strip().replace(" ", "_")
-                    filepath = os.path.join(output_dir, f"{safe}.pdf")
-                    print(f"Downloading bundle {rb['index']} -> {filepath} ...", file=sys.stderr)
-                    try:
-                        pdf = _merge_bundle_pdfs(bundle, args.show_extra, args.show_intclaim)
-                        with open(filepath, "wb") as fh:
-                            fh.write(pdf.getvalue())
-                        size_kb = os.path.getsize(filepath) // 1024
-                        print(f"  Saved ({size_kb:,} KB)", file=sys.stderr)
-                    except ValueError as exc:
-                        print(f"  Failed: {exc}", file=sys.stderr)
-                _download_patent_pdf()
-                _download_index_of_claims()
+                    safe = re.sub(r"[^\w\s\-]", "", bundle["label"]).strip().replace(" ", "_")
+                    _download_sep_bundle_smart(bundle, safe)
+                _download_patent_pdf_smart()
+                _download_index_smart()
+                _finalize_manifest()
             sys.exit(0)
 
         # Text output
@@ -853,21 +991,13 @@ Examples:
                     print(f"    {doc['date'][:10]}  {doc['code']:<12}  "
                           f"{doc['desc'][:48]:<48}  {pages:>4}{tag}")
             if args.download and rb["documents"]:
-                safe     = re.sub(r"[^\w\s\-]", "", bundle["label"]).strip().replace(" ", "_")
-                filepath = os.path.join(output_dir, f"{safe}.pdf")
-                print(f"    -> Downloading to {filepath} ...")
-                try:
-                    pdf = _merge_bundle_pdfs(bundle, args.show_extra, args.show_intclaim)
-                    with open(filepath, "wb") as fh:
-                        fh.write(pdf.getvalue())
-                    size_kb = os.path.getsize(filepath) // 1024
-                    print(f"    -> Saved ({size_kb:,} KB)")
-                except ValueError as exc:
-                    print(f"    -> Failed: {exc}")
+                safe = re.sub(r"[^\w\s\-]", "", bundle["label"]).strip().replace(" ", "_")
+                _download_sep_bundle_smart(bundle, safe)
             print()
         if args.download:
-            _download_patent_pdf()
-            _download_index_of_claims()
+            _download_patent_pdf_smart()
+            _download_index_smart()
+            _finalize_manifest()
         sys.exit(0)
 
     # ================================================================== DEFAULT: 3-bundle mode
@@ -887,6 +1017,18 @@ Examples:
         except ValueError as exc:
             print(f"    -> Failed: {exc}")
 
+    def _download_three_smart(b: dict) -> None:
+        key            = f"bundle_{b['type']}"
+        filename       = f"{b['filename']}.pdf"
+        fp             = _doc_fingerprint(b["documents"]) if b["documents"] else ""
+        needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
+        _artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": needed}
+        if not needed:
+            print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+            return
+        print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+        _download_three(b)
+
     if not args.text:
         output = {
             **meta,
@@ -901,9 +1043,10 @@ Examples:
             os.makedirs(output_dir, exist_ok=True)
             for b in three:
                 if b["documents"]:
-                    _download_three(b)
-            _download_patent_pdf()
-            _download_index_of_claims()
+                    _download_three_smart(b)
+            _download_patent_pdf_smart()
+            _download_index_smart()
+            _finalize_manifest()
         sys.exit(0)
 
     # Text output
@@ -933,9 +1076,10 @@ Examples:
                 print(f"    {doc['date'][:10]}  {doc['code']:<12}  "
                       f"{doc['desc'][:48]:<48}  {pages:>4}")
         if args.download and b["documents"]:
-            _download_three(b)
+            _download_three_smart(b)
         print()
 
     if args.download:
-        _download_patent_pdf()
-        _download_index_of_claims()
+        _download_patent_pdf_smart()
+        _download_index_smart()
+        _finalize_manifest()

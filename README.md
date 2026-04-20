@@ -104,7 +104,28 @@ python bundles_api.py 16123456 --separate-bundles --download
 
 # Custom base URL for download_url links (separate-bundles mode)
 python bundles_api.py 16123456 --separate-bundles --base-url https://myserver.example.com
+
+# Re-run on same application — only changed/missing files are re-downloaded
+# (a manifest.json in the output dir tracks fingerprints of each artifact)
+python bundles_api.py 16123456 --download          # skips files whose docs haven't changed
+python bundles_api.py 16123456 --download          # adds Index_of_claims.pdf if it's now missing
 ```
+
+**Smart re-download (manifest-based caching):**
+
+When `--download` is used, a `manifest.json` is written to the output directory after every run. On subsequent runs with the same application number, each artifact is re-downloaded only if:
+
+| Condition | Action |
+|:---|:---|
+| File is missing on disk | Download |
+| File not recorded in manifest (new artifact type added) | Download |
+| Middle bundle filename changed (e.g. new OA code added) | Download new filename |
+| Document fingerprint changed (new doc added, date changed) | Re-download |
+| No change detected | Skip |
+
+At the end of each run a summary line is printed: `Summary: N downloaded, M skipped.`
+
+To add a new downloadable artifact in the future, add a `_*_smart()` closure in `__main__` that calls `_needs_download()` + `_artifact_state[key] = {...}` and then calls the underlying download function. No other changes needed — `_finalize_manifest()` handles persistence automatically.
 
 **API endpoints:**
 
