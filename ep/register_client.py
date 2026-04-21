@@ -76,9 +76,10 @@ class RegisterSession:
 
     def _get(self, path: str, timeout: int = 20) -> requests.Response:
         """
-        GET a path on register.epo.org with 3-attempt retry on 429/5xx and
-        transient network errors. Does NOT retry 403s (those indicate
-        Cloudflare rejected this UA / IP entirely — retrying won't help).
+        GET a path on register.epo.org with retry logic:
+          - 429 / 5xx: transient server errors — retry after 2s, 4s
+          - 403:       Cloudflare rate-limit (transient) — retry after 20s, 60s
+          - network errors: retry after 2s, 4s
         """
         url = f"{REGISTER_BASE}{path}"
         for attempt in range(3):
@@ -87,6 +88,12 @@ class RegisterSession:
                 if r.status_code == 429 or 500 <= r.status_code < 600:
                     if attempt < 2:
                         time.sleep((attempt + 1) * 2)
+                        continue
+                elif r.status_code == 403:
+                    if attempt < 2:
+                        # Cloudflare transient rate-limit — wait longer before retry
+                        wait = 20 if attempt == 0 else 60
+                        time.sleep(wait)
                         continue
                 return r
             except requests.RequestException:
@@ -191,6 +198,8 @@ class RegisterSession:
 
         merger = PdfWriter()
         for page_num in range(1, page_count + 1):
+            if page_num > 1:
+                time.sleep(0.3)
             page_bytes = self._fetch_page(doc_id, app_num, page_num, timeout)
             merger.append(io.BytesIO(page_bytes))
         out = io.BytesIO()
