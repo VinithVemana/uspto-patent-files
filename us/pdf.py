@@ -23,9 +23,12 @@ def get_patent_pdf_url(patent_number: str) -> str | None:
     logs the actual failure reason (status code or exception) to stderr
     so transient bot-block 503s don't look identical to a real 404.
     """
+    # Google Patents PDF filenames usually include the kind code
+    # (e.g. US11516691B2.pdf) but older grants sometimes omit it
+    # (e.g. US7654321.pdf) — accept either.
     pdf_regex = (
         r"patentimages\.storage\.googleapis\.com/"
-        r"([a-f0-9/]+/US" + re.escape(patent_number) + r"\.pdf)"
+        r"([a-f0-9/]+/US" + re.escape(patent_number) + r"(?:[A-Z][A-Z0-9]*)?\.pdf)"
     )
     for kind_code in ["B2", "B1", ""]:
         gp_url = f"https://patents.google.com/patent/US{patent_number}{kind_code}/en"

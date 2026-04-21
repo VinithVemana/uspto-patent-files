@@ -106,6 +106,11 @@ DO NOT: label any "0 documents, no HTML table" response as a "Cloudflare challen
 Why: The XHTML 1.0 Transitional doctype is EPO Register's own session/rate-limit error page. Cloudflare challenge pages are HTML5 with "Just a moment…" text. Mislabeling confused the user and the error message.
 How to apply: Check response text for EPO-specific markers vs Cloudflare markers before labelling the error. Both cases mean "wait and retry" but the distinction matters for debugging.
 
+**2026-04-21 — Patent PDF regex missed the kind code in the filename**
+DO NOT: hardcode the regex to `US{patent_number}\.pdf` in `get_patent_pdf_url`.
+Why: Google Patents stores most grants with the kind code baked into the filename — e.g. `US11516691B2.pdf`, not `US11516691.pdf`. The metadata returns a bare patent number, so the regex never matched and every download printed the misleading "may be bot-blocked" message. The retry machinery was healthy; the regex was wrong.
+How to apply: Accept an optional trailing kind code in the filename: `US{patent_number}(?:[A-Z][A-Z0-9]*)?\.pdf`. Test against both modern (`B2`, `B1`, `A1`) and legacy grants where the kind code is absent.
+
 **2026-04-16 — all.zip endpoint omitted the patent PDF**
 DO NOT: build the zip from prosecution bundles alone without also fetching the full patent PDF.
 Why: The `all.zip` endpoint didn't call `_get_metadata()`, so `patent_number` was never available and `get_patent_pdf_url()` was never called. The resulting ZIP was missing `US{patent_no}.pdf`, diverging from the CLI's `--download` behavior which always writes all 3 bundle PDFs **plus** the patent PDF.
