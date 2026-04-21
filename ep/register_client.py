@@ -200,7 +200,13 @@ class RegisterSession:
         for page_num in range(1, page_count + 1):
             if page_num > 1:
                 time.sleep(0.3)
-            page_bytes = self._fetch_page(doc_id, app_num, page_num, timeout)
+            try:
+                page_bytes = self._fetch_page(doc_id, app_num, page_num, timeout)
+            except RuntimeError:
+                if merger.pages:
+                    # EPO's page count can exceed the actual PDF length — stop here
+                    break
+                raise
             merger.append(io.BytesIO(page_bytes))
         out = io.BytesIO()
         merger.write(out)

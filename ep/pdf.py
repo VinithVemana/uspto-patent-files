@@ -65,7 +65,7 @@ def merge_bundle_pdfs(
             count += 1
         except Exception as exc:
             failures.append((doc_id, str(exc)))
-        time.sleep(0.4)  # avoid Cloudflare rate-limiting across documents
+        time.sleep(0.6)  # avoid Cloudflare rate-limiting across documents
 
     if count == 0:
         detail = "; ".join(f"{did}: {err[:80]}" for did, err in failures[:3])
