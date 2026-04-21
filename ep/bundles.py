@@ -178,7 +178,7 @@ def build_three_bundles(bundles: list[dict]) -> list[dict]:
         },
         {
             "label":     middle_name,
-            "filename":  middle_name,
+            "filename":  "REM-CTNF-NOA",
             "type":      "round",
             "documents": middle_docs,
         },
@@ -263,7 +263,7 @@ def build_four_bundles(documents: list[dict]) -> list[dict]:
         },
         {
             "label":     prosecution_name,
-            "filename":  prosecution_name,
+            "filename":  "REM-CTNF-NOA",
             "type":      "round",
             "documents": _annotate(middle_docs, "round"),
         },
