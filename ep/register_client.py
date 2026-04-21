@@ -173,6 +173,13 @@ class RegisterSession:
             })
 
         docs.sort(key=lambda d: d["date"])
+        if not docs and "identivier" not in r.text:
+            # Cloudflare returned a challenge/block page instead of the real doclist
+            raise RuntimeError(
+                f"Doclist for {app_num} returned 0 documents and no document "
+                f"table — likely a Cloudflare challenge page. "
+                f"First 200 chars: {r.text[:200]!r}"
+            )
         return docs
 
     # ------------------------------------------------------------------
