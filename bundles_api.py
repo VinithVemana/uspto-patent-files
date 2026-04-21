@@ -103,7 +103,7 @@ Examples:
     parser.add_argument("--download",         action="store_true",
                         help="Download each bundle as a merged PDF to disk")
     parser.add_argument("--output-dir",       default=None,
-                        help="Directory to save PDFs (default: ./{app_no}/)")
+                        help="Directory to save PDFs (default: ./US{patent_no}/ or ./{app_no}/ if not yet granted)")
     parser.add_argument("--base-url",         default="http://localhost:7901",
                         help="Base URL for download_url links (default: http://localhost:7901)")
     parser.add_argument("--patent",            action="store_true",
@@ -131,7 +131,9 @@ Examples:
         print("No prosecution documents found.", file=sys.stderr)
         sys.exit(0)
 
-    output_dir      = args.output_dir if args.output_dir is not None else app_no
+    patent_no_meta  = meta.get("patent_number")
+    default_dir     = f"US{patent_no_meta}" if patent_no_meta else app_no
+    output_dir      = args.output_dir if args.output_dir is not None else default_dir
     manifest        = _load_manifest(output_dir) if args.download else {}
     _artifact_state: dict = {}
     _failures:       list = []
