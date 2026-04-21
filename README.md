@@ -499,6 +499,11 @@ python bundles_api_ep.py 10173239                 # bare EP application number
 python bundles_api_ep.py EP10173239.4             # check digit stripped
 python bundles_api_ep.py EP3456789B1              # kind code stripped
 python bundles_api_ep.py WO2015077217             # best-effort PCT/WO → EP lookup
+
+# Bulk mode — space, comma, or pipe separated; each patent gets its own EP{app_no}/ subfolder
+python bundles_api_ep.py EP2420929 EP2985974 EP3456789B1 --download --output-dir ./bulk
+python bundles_api_ep.py "EP2420929,EP2985974,EP3456789B1" --download --output-dir ./bulk
+python bundles_api_ep.py "EP2420929|EP2985974|EP3456789B1" --download --output-dir ./bulk
 ```
 
 ### Input formats accepted

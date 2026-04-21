@@ -27,6 +27,8 @@ python bundles_api_ep.py EP2985974
 python bundles_api_ep.py EP2985974 --text
 python bundles_api_ep.py EP2985974 --list-docs
 python bundles_api_ep.py EP2985974 --download
+python bundles_api_ep.py EP2420929 EP2985974 EP3456789B1 --download --output-dir ./bulk  # bulk
+python bundles_api_ep.py "EP2420929,EP2985974" --download --output-dir ./bulk  # comma-sep
 ```
 
 **EP credentials** — register at developers.epo.org and add to `.env`:

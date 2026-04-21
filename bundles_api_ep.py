@@ -13,6 +13,15 @@ INPUT FORMATS
   Bare 7-digit pub        3456789             ambiguous — tries as pub first
   WO/PCT publication      WO2015077217        or  WO2015/077217 / PCT/...
 
+BULK MODE
+---------
+Pass multiple patents as space-, comma-, or pipe-separated values.
+Each patent gets its own subfolder inside --output-dir.
+
+    python bundles_api_ep.py EP2420929 EP2985974 EP3456789B1 --download --output-dir ./bulk
+    python bundles_api_ep.py "EP2420929,EP2985974,EP3456789B1" --download --output-dir ./bulk
+    python bundles_api_ep.py "EP2420929|EP2985974|EP3456789B1" --download --output-dir ./bulk
+
 RUN FROM THE COMMAND LINE
 -------------------------
     python bundles_api_ep.py <number> [options]
@@ -34,6 +43,10 @@ RUN FROM THE COMMAND LINE
       python bundles_api_ep.py EP2985974 --download --output-dir ./ep_docs
       python bundles_api_ep.py WO2015077217 --text
       python bundles_api_ep.py EP2420929 --list-docs            # dry-run listing
+
+      # Bulk download — space, comma, or pipe separated; each gets its own subfolder
+      python bundles_api_ep.py EP2420929 EP2985974 --download --output-dir ./bulk
+      python bundles_api_ep.py "EP2420929,EP2985974" --download --output-dir ./bulk
 
 WEB SERVER
 ----------
@@ -327,7 +340,10 @@ def _build_cli() -> argparse.ArgumentParser:
         epilog=__doc__.split("RUN FROM THE COMMAND LINE")[1] if __doc__ else "",
     )
     p.add_argument("number",
-                   help="EP application / publication number, or WO/PCT publication. "
+                   nargs="+",
+                   help="One or more EP application/publication numbers, or WO/PCT publications "
+                        "(space-, comma-, or pipe-separated). In bulk mode each patent gets its "
+                        "own EP{app_no}/ subfolder inside --output-dir. "
                         "Examples: EP2420929, 10173239, EP3456789A1, WO2015077217.")
     p.add_argument("--separate-bundles", action="store_true",
                    help="One PDF per prosecution round (default: 4-bundle collapse)")
@@ -348,33 +364,44 @@ def _build_cli() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _build_cli().parse_args(argv)
+def _process_one_ep_patent(
+    input_str: str,
+    args: argparse.Namespace,
+    parent_output_dir: str | None,
+) -> bool:
+    """
+    Resolve + fetch + (optionally) download one EP patent.
 
-    # --- Resolve & fetch ---
+    parent_output_dir: if set, saves to <parent_output_dir>/EP{app_no}/
+                       (bulk mode). None → use args.output_dir or default.
+    Returns True on success, False on any fatal error.
+    """
     try:
-        app_no, pub_no, meta, documents, session = _fetch_everything(args.number)
+        app_no, pub_no, meta, documents, session = _fetch_everything(input_str)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+        return False
 
     if not documents:
         print("No prosecution documents found in the EPO Register for this application.",
               file=sys.stderr)
-        return 0
+        return False
 
-    # --- List-docs mode: dry-run inspection ---
     if args.list_docs:
         _cmd_list_docs(meta, documents)
-        return 0
+        return True
 
-    output_dir = args.output_dir if args.output_dir is not None else f"EP{app_no}"
+    if parent_output_dir is not None:
+        output_dir = os.path.join(parent_output_dir, f"EP{app_no}")
+    else:
+        output_dir = args.output_dir if args.output_dir is not None else f"EP{app_no}"
 
     # ======================================================= SEPARATE-BUNDLES mode
     if args.separate_bundles:
         bundles_list = ep_bundles.build_prosecution_bundles(documents)
         base = args.base_url.rstrip("/")
-        flag_qs = f"?show_extra={str(args.show_extra).lower()}&show_intclaim={str(args.show_intclaim).lower()}"
+        flag_qs = (f"?show_extra={str(args.show_extra).lower()}"
+                   f"&show_intclaim={str(args.show_intclaim).lower()}")
 
         result_bundles = []
         for bundle in bundles_list:
@@ -419,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.show_extra, args.show_intclaim
             )
             _finalize_manifest(output_dir, app_no, state, failures)
-        return 0
+        return True
 
     # ======================================================= DEFAULT: 4-bundle mode
     four = ep_bundles.build_four_bundles(documents)
@@ -451,7 +478,50 @@ def main(argv: list[str] | None = None) -> int:
         state, failures = _download_bundles(four, session, app_no, output_dir, manifest)
         _finalize_manifest(output_dir, app_no, state, failures)
 
-    return 0
+    return True
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_cli().parse_args(argv)
+
+    # Flatten all tokens — split on commas and pipes so any separator style works
+    raw_tokens: list[str] = []
+    for token in args.number:
+        raw_tokens.extend(re.split(r"[,|]+", token))
+    inputs = [t.strip() for t in raw_tokens if t.strip()]
+
+    if len(inputs) == 1:
+        ok = _process_one_ep_patent(inputs[0], args, parent_output_dir=None)
+        return 0 if ok else 1
+
+    # ------------------------------------------------------------------ Bulk mode
+    parent_dir = args.output_dir  # None → each patent defaults to ./EP{app_no}/ in cwd
+    n = len(inputs)
+    print(f"\nBulk mode: {n} patents", file=sys.stderr)
+    if parent_dir:
+        print(f"Output root: {parent_dir}/EP{{app_no}}/", file=sys.stderr)
+    else:
+        print("Output root: ./EP{app_no}/ (per patent)", file=sys.stderr)
+
+    results: list[tuple[str, bool]] = []
+    pbar = tqdm(inputs, desc="Patents", unit="patent")
+    for inp in pbar:
+        pbar.set_postfix_str(inp)
+        tqdm.write(f"\n{'='*60}\n[{len(results)+1}/{n}] {inp}\n{'='*60}")
+        ok = _process_one_ep_patent(inp, args, parent_output_dir=parent_dir)
+        results.append((inp, ok))
+
+    succeeded   = sum(1 for _, ok in results if ok)
+    failed_list = [(inp, ok) for inp, ok in results if not ok]
+
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"Bulk run complete: {succeeded}/{n} succeeded.", file=sys.stderr)
+    if failed_list:
+        print("Failed patents:", file=sys.stderr)
+        for inp, _ in failed_list:
+            print(f"  - {inp}", file=sys.stderr)
+
+    return 0 if not failed_list else 1
 
 
 if __name__ == "__main__":
