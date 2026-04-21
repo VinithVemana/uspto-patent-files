@@ -14,6 +14,8 @@ python bundles_api.py US10902286          # patent grant number
 python bundles_api.py US20210367709A1     # pre-grant publication
 python bundles_api.py 16123456 --download --output-dir ./pdfs
 python bundles_api.py 16123456 --text
+python bundles_api.py US10897328B2 US10912060B2 --download --output-dir ./bulk  # bulk
+python bundles_api.py "US10897328B2,US10912060B2" --download --output-dir ./bulk  # comma-sep
 python bundles_api.py 16123456 --separate-bundles
 ```
 

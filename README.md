@@ -87,6 +87,12 @@ python bundles_api.py 16123456 --text
 python bundles_api.py 16123456 --download --output-dir ./pdfs
 python bundles_api.py 16123456 | jq .bundles[].download_url
 
+# Bulk download — space, comma, or pipe separated
+# Each patent gets its own US{no}/ subfolder inside --output-dir
+python bundles_api.py US10897328B2 US10912060B2 US10952166B2 --download --output-dir ./bulk
+python bundles_api.py "US10897328B2,US10912060B2,US10952166B2" --download --output-dir ./bulk
+python bundles_api.py "US10897328B2|US10912060B2|US10952166B2" --download --output-dir ./bulk
+
 # By patent grant number — auto-resolved to application number
 python bundles_api.py US10902286
 python bundles_api.py US11973593B2             # kind code stripped automatically
