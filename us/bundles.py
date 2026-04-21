@@ -195,7 +195,7 @@ def _build_three_bundles(bundles: list) -> list:
     return [
         {
             "label":     "Initial Claims",
-            "filename":  "initial_claims",
+            "filename":  "Initial_claims",
             "type":      "initial",
             "documents": initial["documents"] if initial else [],
         },
@@ -207,7 +207,7 @@ def _build_three_bundles(bundles: list) -> list:
         },
         {
             "label":     "Granted Claims",
-            "filename":  "granted_claims",
+            "filename":  "Granted_claims",
             "type":      "granted",
             "documents": granted["documents"] if granted else [],
         },

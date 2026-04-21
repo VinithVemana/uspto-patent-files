@@ -163,7 +163,7 @@ def build_three_bundles(bundles: list[dict]) -> list[dict]:
     name_parts = [c for c in _MIDDLE_CODE_ORDER if c in present_codes]
     middle_name = "-".join(name_parts) if name_parts else "prosecution"
 
-    terminal_name = "granted_claims"
+    terminal_name = "Granted_claims"
     terminal_label = "Granted"
     if terminal and any(_is_refusal(d) for d in terminal["documents"]):
         terminal_name = "refused"
@@ -172,7 +172,7 @@ def build_three_bundles(bundles: list[dict]) -> list[dict]:
     return [
         {
             "label":     "Initial / International",
-            "filename":  "initial",
+            "filename":  "Initial_claims",
             "type":      "initial",
             "documents": initial["documents"] if initial else [],
         },
@@ -206,10 +206,10 @@ def build_four_bundles(documents: list[dict]) -> list[dict]:
     """
     if not documents:
         return [
-            {"label": "Initial Claims",  "filename": "initial_claims",  "type": "initial",         "documents": []},
-            {"label": "Prosecution",     "filename": "prosecution",     "type": "round",            "documents": []},
-            {"label": "Granted Claims",  "filename": "granted_claims",  "type": "granted",          "documents": []},
-            {"label": "Patent Document", "filename": "patent_document", "type": "patent_document",  "documents": []},
+            {"label": "Initial Claims",  "filename": "Initial_claims",  "type": "initial",         "documents": []},
+            {"label": "Prosecution",     "filename": "Prosecution",     "type": "round",            "documents": []},
+            {"label": "Granted Claims",  "filename": "Granted_claims",  "type": "granted",          "documents": []},
+            {"label": "Patent Document", "filename": "Granted_document", "type": "patent_document", "documents": []},
         ]
 
     docs = sorted(documents, key=lambda d: d["date"])
@@ -250,28 +250,32 @@ def build_four_bundles(documents: list[dict]) -> list[dict]:
     skip        = {id(d) for d in initial_docs + granted_docs + patent_docs}
     middle_docs = [d for d in docs if id(d) not in skip]
 
+    present_codes = {d["code"] for d in middle_docs}
+    name_parts    = [c for c in _MIDDLE_CODE_ORDER if c in present_codes]
+    prosecution_name = "-".join(name_parts) if name_parts else "Prosecution"
+
     return [
         {
             "label":     "Initial Claims",
-            "filename":  "initial_claims",
+            "filename":  "Initial_claims",
             "type":      "initial",
             "documents": _annotate(initial_docs, "initial"),
         },
         {
-            "label":     "Prosecution",
-            "filename":  "prosecution",
+            "label":     prosecution_name,
+            "filename":  prosecution_name,
             "type":      "round",
             "documents": _annotate(middle_docs, "round"),
         },
         {
             "label":     "Granted Claims",
-            "filename":  "granted_claims",
+            "filename":  "Granted_claims",
             "type":      "granted",
             "documents": _annotate(granted_docs, "granted"),
         },
         {
             "label":     "Patent Document",
-            "filename":  "patent_document",
+            "filename":  "Granted_document",
             "type":      "patent_document",
             "documents": _annotate(patent_docs, "granted"),
         },

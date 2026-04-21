@@ -142,7 +142,7 @@ Examples:
             print("  (no patent number — application not yet granted, skipping patent.pdf)",
                   file=sys.stderr)
             return False, "no patent number"
-        filename = f"US{patent_no}.pdf"
+        filename = "Granted_document.pdf"
         filepath = os.path.join(output_dir, filename)
         print(f"  Fetching full patent PDF for US{patent_no} ...", file=sys.stderr)
         pdf_url = get_patent_pdf_url(patent_no)

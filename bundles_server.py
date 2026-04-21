@@ -224,11 +224,10 @@ def download_patent_pdf(application_number: str):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to fetch patent PDF: {exc}")
 
-    filename = f"US{patent_number}.pdf"
     return StreamingResponse(
         r.iter_content(chunk_size=65536),
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": 'attachment; filename="Granted_document.pdf"'},
     )
 
 
@@ -361,7 +360,7 @@ def download_all_bundles_zip(application_number: str):
                         timeout=60,
                     )
                     if r.status_code == 200:
-                        zf.writestr(f"US{patent_no}.pdf", r.content)
+                        zf.writestr("Granted_document.pdf", r.content)
                 except Exception:
                     pass   # best effort — skip if unavailable
 
