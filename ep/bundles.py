@@ -191,6 +191,93 @@ def build_three_bundles(bundles: list[dict]) -> list[dict]:
     ]
 
 
+def build_four_bundles(documents: list[dict]) -> list[dict]:
+    """
+    Collapse docs directly into exactly 4 logical bundles for download:
+
+        0 — initial_claims  : bare "Claims" filing doc(s)
+        1 — prosecution     : all other docs sorted by date
+        2 — granted_claims  : last amended-claims doc(s) before text-for-grant
+        3 — patent_document : "Text intended for grant (clean copy)"
+
+    Works on the raw flat document list — no need to call
+    build_prosecution_bundles() first. If no text-for-grant exists (still
+    pending or refused), bundles 2 and 3 are empty.
+    """
+    if not documents:
+        return [
+            {"label": "Initial Claims",  "filename": "initial_claims",  "type": "initial",         "documents": []},
+            {"label": "Prosecution",     "filename": "prosecution",     "type": "round",            "documents": []},
+            {"label": "Granted Claims",  "filename": "granted_claims",  "type": "granted",          "documents": []},
+            {"label": "Patent Document", "filename": "patent_document", "type": "patent_document",  "documents": []},
+        ]
+
+    docs = sorted(documents, key=lambda d: d["date"])
+    for d in docs:
+        d["code"]      = config.short_code(d["doc_type"])
+        d["direction"] = _infer_direction(d["doc_type"])
+
+    # Layer 3: text intended for grant
+    patent_docs = [d for d in docs if _is_text_for_grant(d)]
+    patent_date = patent_docs[0]["date"] if patent_docs else None
+
+    # Layer 0: bare "Claims" filing doc(s) — earliest occurrence only
+    filing_docs = [d for d in docs if _is_filing_claims(d)]
+    if filing_docs:
+        earliest_date = filing_docs[0]["date"]
+        initial_docs  = [d for d in filing_docs if d["date"] == earliest_date]
+    else:
+        initial_docs = []
+
+    # Layer 2: last amended-claims doc(s) strictly before the patent_document date
+    if patent_date:
+        pre_grant = [
+            d for d in docs
+            if d["date"] < patent_date
+            and not _is_text_for_grant(d)
+            and not _is_filing_claims(d)
+        ]
+        amended = [d for d in pre_grant if _is_amended_claims(d)]
+        if amended:
+            last_amend_date = amended[-1]["date"]
+            granted_docs    = [d for d in amended if d["date"] == last_amend_date]
+        else:
+            granted_docs = []
+    else:
+        granted_docs = []
+
+    # Layer 1: everything not in the other three layers
+    skip        = {id(d) for d in initial_docs + granted_docs + patent_docs}
+    middle_docs = [d for d in docs if id(d) not in skip]
+
+    return [
+        {
+            "label":     "Initial Claims",
+            "filename":  "initial_claims",
+            "type":      "initial",
+            "documents": _annotate(initial_docs, "initial"),
+        },
+        {
+            "label":     "Prosecution",
+            "filename":  "prosecution",
+            "type":      "round",
+            "documents": _annotate(middle_docs, "round"),
+        },
+        {
+            "label":     "Granted Claims",
+            "filename":  "granted_claims",
+            "type":      "granted",
+            "documents": _annotate(granted_docs, "granted"),
+        },
+        {
+            "label":     "Patent Document",
+            "filename":  "patent_document",
+            "type":      "patent_document",
+            "documents": _annotate(patent_docs, "granted"),
+        },
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Filtering helpers (public)
 # ---------------------------------------------------------------------------
@@ -250,7 +337,21 @@ def _is_grant(doc: dict) -> bool:
     return ("decision to grant a european patent" in t
             or "mention of the grant" in t
             or "communication about intention to grant" in t
-            or "intention to grant (signatures)" in t)
+            or "intention to grant (signatures)" in t
+            or "text intended for grant" in t)
+
+
+def _is_text_for_grant(doc: dict) -> bool:
+    return "text intended for grant" in _norm(doc["doc_type"])
+
+
+def _is_filing_claims(doc: dict) -> bool:
+    """True for the bare 'Claims' doc filed at application time (exact type match)."""
+    return _norm(doc["doc_type"]) == "claims"
+
+
+def _is_amended_claims(doc: dict) -> bool:
+    return "amended claims" in _norm(doc["doc_type"])
 
 
 def _is_refusal(doc: dict) -> bool:

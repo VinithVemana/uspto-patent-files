@@ -199,20 +199,20 @@ def _cmd_list_docs(meta: dict, documents: list[dict]) -> None:
 # Download orchestration (for --download)
 # ===========================================================================
 
-def _download_three(
-    three: list[dict], session: RegisterSession, app_no: str, output_dir: str,
+def _download_bundles(
+    bundles: list[dict], session: RegisterSession, app_no: str, output_dir: str,
     manifest: dict,
 ) -> tuple[dict, list[dict]]:
-    """Download the 3-bundle collapse. Returns (artifacts_state, failures)."""
+    """Download the 4-bundle collapse. Returns (artifacts_state, failures)."""
     state: dict = {}
     failures: list[dict] = []
 
-    for b in three:
+    for b in bundles:
         if not b["documents"]:
             continue
         filename = f"{b['filename']}.pdf"
         fp       = ep_pdf.doc_fingerprint(b["documents"])
-        key      = f"bundle_{b['type']}"
+        key      = f"bundle_{b['filename']}"
         needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
         if not needed:
             state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
@@ -330,7 +330,7 @@ def _build_cli() -> argparse.ArgumentParser:
                    help="EP application / publication number, or WO/PCT publication. "
                         "Examples: EP2420929, 10173239, EP3456789A1, WO2015077217.")
     p.add_argument("--separate-bundles", action="store_true",
-                   help="One PDF per prosecution round (default: 3-bundle collapse)")
+                   help="One PDF per prosecution round (default: 4-bundle collapse)")
     p.add_argument("--show-extra",   action="store_true",
                    help="Include supporting admin docs (delivery notes, receipts, minutes, oral-proc prep)")
     p.add_argument("--show-intclaim", action="store_true",
@@ -368,14 +368,11 @@ def main(argv: list[str] | None = None) -> int:
         _cmd_list_docs(meta, documents)
         return 0
 
-    # --- Build bundles ---
-    bundles_list = ep_bundles.build_prosecution_bundles(documents)
-    three        = ep_bundles.build_three_bundles(bundles_list)
-
     output_dir = args.output_dir if args.output_dir is not None else f"EP{app_no}"
 
     # ======================================================= SEPARATE-BUNDLES mode
     if args.separate_bundles:
+        bundles_list = ep_bundles.build_prosecution_bundles(documents)
         base = args.base_url.rstrip("/")
         flag_qs = f"?show_extra={str(args.show_extra).lower()}&show_intclaim={str(args.show_intclaim).lower()}"
 
@@ -424,30 +421,34 @@ def main(argv: list[str] | None = None) -> int:
             _finalize_manifest(output_dir, app_no, state, failures)
         return 0
 
-    # ======================================================= DEFAULT: 3-bundle mode
+    # ======================================================= DEFAULT: 4-bundle mode
+    four = ep_bundles.build_four_bundles(documents)
+
     if not args.text:
         print(json.dumps({**meta, "bundles": [
             {"filename": b["filename"], "label": b["label"], "type": b["type"],
-             "documents": b["documents"]} for b in three
+             "documents": b["documents"]} for b in four
         ]}, indent=2, default=str))
     else:
         _print_metadata_header(meta)
-        print(f"\n3-bundle mode  (use --separate-bundles for one PDF per round)\n")
-        for b in three:
+        print(f"\n4-bundle mode  (use --separate-bundles for one PDF per round)\n")
+        for b in four:
             print(f"[{b['filename']}]")
             if not b["documents"]:
                 print("    (no documents)")
                 continue
             for doc in b["documents"]:
                 pages = f"{doc['pages']}p" if doc["pages"] else "?p"
+                tier  = doc.get("category", "default")
+                tag   = ep_config.category_label(tier)
                 print(f"    {doc['date']}  {doc['code']:<8} "
-                      f"{doc['doc_type'][:55]:<55}  {pages:>4}")
+                      f"{doc['doc_type'][:55]:<55}  {pages:>4}{tag}")
             print()
 
     if args.download:
         os.makedirs(output_dir, exist_ok=True)
         manifest = _load_manifest(output_dir)
-        state, failures = _download_three(three, session, app_no, output_dir, manifest)
+        state, failures = _download_bundles(four, session, app_no, output_dir, manifest)
         _finalize_manifest(output_dir, app_no, state, failures)
 
     return 0

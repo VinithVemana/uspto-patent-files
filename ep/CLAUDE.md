@@ -33,13 +33,22 @@ Input (EP app / EP pub / WO-PCT)
 
 ## Bundle Types
 
+### Default mode — `build_four_bundles()` (4 PDFs)
+
+| Bundle | Filename | Contents |
+|---|---|---|
+| **Initial Claims** (`initial`) | `initial_claims.pdf` | Bare "Claims" doc(s) filed at EP entry |
+| **Prosecution** (`round`) | `prosecution.pdf` | Everything else: ISR, ESR, OA rounds, replies, intermediate amendments |
+| **Granted Claims** (`granted`) | `granted_claims.pdf` | Last "Amended claims" doc before text-for-grant |
+| **Patent Document** (`patent_document`) | `patent_document.pdf` | "Text intended for grant (clean copy)" |
+
+### Separate-bundles mode — `build_prosecution_bundles()` (one PDF per OA round)
+
 | Bundle | Contents |
 |---|---|
 | **Initial** (`initial`) | Filing docs + ESR/ESO (direct-EP) OR WOISA + ISR + IPER (PCT-route) + pre-exam amendments |
 | **Round N** (`round` / `final_round`) | Each "Communication from the Examining Division" or "Summons" + applicant responses |
-| **Granted** (`granted`) | "Intention to grant" + "Decision to grant" — or a Refused bundle |
-
-3-bundle filename built from `_MIDDLE_CODE_ORDER = ["RESP","OA","SUMMON","GRANT","REFUSE"]`.
+| **Granted** (`granted`) | "Intention to grant" + "Decision to grant" + "Text intended for grant" — or a Refused bundle |
 
 ## Credentials
 

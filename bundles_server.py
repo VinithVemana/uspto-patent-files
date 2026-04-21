@@ -58,16 +58,16 @@ GET /ep/resolve/{number}
   Resolve any input to an EP application number + publication number.
 
 GET /ep/bundles/{number}
-  Metadata + 3-bundle prosecution view (JSON).
+  Metadata + 4-bundle prosecution view (JSON).
   Query params:
     show_extra=true       Include supporting admin docs
     show_intclaim=true    Include intermediate claim docs in round bundles
 
 GET /ep/bundles/{number}/{bundle_index}/pdf
-  Stream a merged PDF for one of the 3 bundles.
+  Stream a merged PDF for one of the 4 bundles (indices 0–3).
 
 GET /ep/bundles/{number}/all.zip
-  Stream a ZIP of all 3 bundle PDFs.
+  Stream a ZIP of all 4 bundle PDFs.
 """
 
 import io
@@ -450,23 +450,22 @@ def ep_resolve_number(number: str):
 def ep_get_bundles(number: str, request: Request,
                    show_extra: bool = False, show_intclaim: bool = False):
     """
-    Return EP application metadata + prosecution bundles (3-bundle mode).
+    Return EP application metadata + prosecution bundles (4-bundle mode).
 
     Query params:
       show_extra=true       Include supporting admin docs (delivery, receipts, minutes)
       show_intclaim=true    Include intermediate claim docs inside round bundles
 
-    Collapses every prosecution round into 3 logical groups matching the CLI:
-      0 — initial.pdf          (filing + ESR/ISR + pre-exam amendments)
-      1 — {RESP-OA-...}.pdf    (all EP examination round docs, date-sorted)
-      2 — granted_claims.pdf   (intention to grant + decision)
-                               or refused.pdf if refused
+    Collapses every prosecution round into 4 logical groups matching the CLI:
+      0 — initial_claims.pdf   (bare "Claims" filing doc)
+      1 — prosecution.pdf      (all other prosecution docs, date-sorted)
+      2 — granted_claims.pdf   (last amended-claims doc before text-for-grant)
+      3 — patent_document.pdf  (text intended for grant)
     """
     app_no, pub_no, meta, docs, _ = _fetch_ep_meta_and_docs(number)
 
-    bundles_list = ep_bundles.build_prosecution_bundles(docs)
-    three        = ep_bundles.build_three_bundles(bundles_list)
-    base         = str(request.base_url).rstrip("/")
+    four = ep_bundles.build_four_bundles(docs)
+    base = str(request.base_url).rstrip("/")
 
     return {
         **meta,
@@ -481,7 +480,7 @@ def ep_get_bundles(number: str, request: Request,
                     b["documents"], show_extra=show_extra, show_intclaim=show_intclaim
                 ),
             }
-            for i, b in enumerate(three)
+            for i, b in enumerate(four)
         ],
     }
 
@@ -490,20 +489,19 @@ def ep_get_bundles(number: str, request: Request,
 def ep_download_bundle_pdf(number: str, bundle_index: int,
                            show_extra: bool = False, show_intclaim: bool = False):
     """
-    Stream a merged PDF for one of the 3 EP prosecution bundles (indices 0–2).
+    Stream a merged PDF for one of the 4 EP prosecution bundles (indices 0–3).
 
     Session cookies for register.epo.org are established per-request.
     """
     app_no, _, _, docs, session = _fetch_ep_meta_and_docs(number)
-    bundles_list = ep_bundles.build_prosecution_bundles(docs)
-    three        = ep_bundles.build_three_bundles(bundles_list)
+    four = ep_bundles.build_four_bundles(docs)
 
-    if bundle_index < 0 or bundle_index >= len(three):
+    if bundle_index < 0 or bundle_index >= len(four):
         raise HTTPException(
             status_code=404,
-            detail=f"Bundle {bundle_index} not found (total: {len(three)})",
+            detail=f"Bundle {bundle_index} not found (total: {len(four)})",
         )
-    b = three[bundle_index]
+    b = four[bundle_index]
 
     try:
         pdf = ep_pdf.merge_bundle_pdfs(
@@ -525,17 +523,16 @@ def ep_download_bundle_pdf(number: str, bundle_index: int,
 def ep_download_all_bundles_zip(number: str,
                                 show_extra: bool = False, show_intclaim: bool = False):
     """
-    Stream a ZIP of all 3 EP bundle PDFs.
+    Stream a ZIP of all 4 EP bundle PDFs.
 
     Matches the CLI's default-mode --download behavior.
     """
     app_no, _, _, docs, session = _fetch_ep_meta_and_docs(number)
-    bundles_list = ep_bundles.build_prosecution_bundles(docs)
-    three        = ep_bundles.build_three_bundles(bundles_list)
+    four = ep_bundles.build_four_bundles(docs)
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for b in three:
+        for b in four:
             if not b["documents"]:
                 continue
             try:

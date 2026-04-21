@@ -69,9 +69,9 @@ ep/                  EP core module   — see ep/CLAUDE.md
 | Endpoint | Description |
 |---|---|
 | `GET /ep/resolve/{number}` | Resolve EP/WO → `{application_number, publication_number}` |
-| `GET /ep/bundles/{number}` | Metadata + 3 bundles (JSON) |
-| `GET /ep/bundles/{number}/{index}/pdf` | Streamed merged PDF for one bundle |
-| `GET /ep/bundles/{number}/all.zip` | ZIP of all 3 bundle PDFs |
+| `GET /ep/bundles/{number}` | Metadata + 4 bundles (JSON) |
+| `GET /ep/bundles/{number}/{index}/pdf` | Streamed merged PDF for one bundle (indices 0–3) |
+| `GET /ep/bundles/{number}/all.zip` | ZIP of all 4 bundle PDFs |
 
 Query params on bundle endpoints: `show_extra` (bool), `show_intclaim` (bool).
 

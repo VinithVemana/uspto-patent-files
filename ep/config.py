@@ -126,6 +126,7 @@ GRANT_TYPES = {
     "decision to grant a european patent",
     "intention to grant (signatures)",
     "mention of the grant",
+    "text intended for grant",
 }
 
 
