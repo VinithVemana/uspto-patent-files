@@ -200,13 +200,19 @@ class RegisterSession:
         for page_num in range(1, page_count + 1):
             if page_num > 1:
                 time.sleep(0.3)
-            try:
-                page_bytes = self._fetch_page(doc_id, app_num, page_num, timeout)
-            except RuntimeError:
-                if merger.pages:
-                    # EPO's page count can exceed the actual PDF length — stop here
+            # Per-page retry: Cloudflare may block mid-document; wait and re-warm
+            for attempt in range(3):
+                try:
+                    page_bytes = self._fetch_page(doc_id, app_num, page_num, timeout)
                     break
-                raise
+                except RuntimeError:
+                    if attempt < 2:
+                        wait = 30 if attempt == 0 else 90
+                        self._warmed_for = None
+                        self.warm(app_num)
+                        time.sleep(wait)
+                    else:
+                        raise
             merger.append(io.BytesIO(page_bytes))
         out = io.BytesIO()
         merger.write(out)
