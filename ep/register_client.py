@@ -206,7 +206,7 @@ class RegisterSession:
         merger = PdfWriter()
         for page_num in range(1, page_count + 1):
             if page_num > 1:
-                time.sleep(0.3)
+                time.sleep(0.1)
             # Per-page retry: Cloudflare may block mid-document; wait and re-warm
             for attempt in range(3):
                 try:
