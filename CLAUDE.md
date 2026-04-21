@@ -115,3 +115,8 @@ How to apply: Accept an optional trailing kind code in the filename: `US{patent_
 DO NOT: build the zip from prosecution bundles alone without also fetching the full patent PDF.
 Why: The `all.zip` endpoint didn't call `_get_metadata()`, so `patent_number` was never available and `get_patent_pdf_url()` was never called. The resulting ZIP was missing `US{patent_no}.pdf`, diverging from the CLI's `--download` behavior which always writes all 3 bundle PDFs **plus** the patent PDF.
 How to apply: In `download_all_bundles_zip`, always call `_get_metadata()` first, then after writing the 3 bundle PDFs call `get_patent_pdf_url(patent_no)` and write `US{patent_no}.pdf` into the ZIP — exactly mirroring `_download_patent_pdf()` in the CLI.
+
+**2026-04-21 — --use-zip feature built on a non-existent EPO endpoint**
+DO NOT: add a bulk-ZIP download mode for EPO Register without first verifying the endpoint exists and is accessible from non-browser clients.
+Why: The feature assumed a GET endpoint `downloadDocuments?appNumber=...` existed. It doesn't (404). The real mechanism is a form POST to `/download` with selected doc IDs, but Cloudflare blocks that POST from non-browser clients (`403 cf-mitigated: challenge`). The reimplemented fallback (per-doc GETs pre-fetched into memory) downloaded ALL docs including ones not needed for bundles — strictly worse than the regular `--download` path which only fetches docs actually used in bundles.
+How to apply: Don't add `--use-zip` or similar bulk-prefetch modes for EPO Register. The regular `--download` per-doc approach is correct. If Cloudflare becomes a problem, the solution is better retry/re-warm logic, not bulk prefetching.
