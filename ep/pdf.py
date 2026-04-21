@@ -58,7 +58,7 @@ def merge_bundle_pdfs(
         if not doc_id:
             continue
         try:
-            pdf_bytes = session.fetch_pdf(doc_id, app_number)
+            pdf_bytes = session.fetch_pdf(doc_id, app_number, pages=doc.get("pages", 1))
             outline = f"[{doc.get('code','?')}] — {doc['doc_type']} ({doc['date']})"
             merger.append(io.BytesIO(pdf_bytes), outline_item=outline)
             count += 1

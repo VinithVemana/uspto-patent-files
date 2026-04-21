@@ -32,12 +32,14 @@ Each returned document dict:
 
 from __future__ import annotations
 
+import io
 import re
 import time
 from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
+from PyPDF2 import PdfWriter
 
 REGISTER_BASE = "https://register.epo.org"
 
@@ -170,19 +172,37 @@ class RegisterSession:
     # PDF fetch — the iframe-style showPdfPage URL returns application/pdf
     # ------------------------------------------------------------------
 
-    def fetch_pdf(self, doc_id: str, app_number: str, timeout: int = 45) -> bytes:
+    def fetch_pdf(self, doc_id: str, app_number: str, *, pages: int = 1, timeout: int = 45) -> bytes:
         """
-        Download the PDF for *doc_id* and return the raw bytes.
+        Download all pages of the PDF for *doc_id* and return merged bytes.
 
-        Raises RuntimeError if the response is not a valid PDF (e.g. the
-        session cookie expired or Cloudflare served a challenge page).
+        pages: total page count from the doclist (default 1 for callers that
+               don't have it). Each EPO Register page is a separate HTTP fetch.
+
+        Raises RuntimeError if any page is not a valid PDF.
         """
         app_num = app_number if app_number.upper().startswith("EP") else f"EP{app_number}"
         if self._warmed_for != app_num:
             self.warm(app_num)
 
+        page_count = max(pages, 1)
+        if page_count == 1:
+            return self._fetch_page(doc_id, app_num, 1, timeout)
+
+        merger = PdfWriter()
+        for page_num in range(1, page_count + 1):
+            page_bytes = self._fetch_page(doc_id, app_num, page_num, timeout)
+            merger.append(io.BytesIO(page_bytes))
+        out = io.BytesIO()
+        merger.write(out)
+        merger.close()
+        out.seek(0)
+        return out.read()
+
+    def _fetch_page(self, doc_id: str, app_num: str, page_num: int, timeout: int) -> bytes:
+        """Fetch a single page of a register document. Re-warms session on non-PDF response."""
         path = (
-            f"/application?showPdfPage=1"
+            f"/application?showPdfPage={page_num}"
             f"&documentId={doc_id}"
             f"&appnumber={app_num}"
             f"&proc="
@@ -191,19 +211,17 @@ class RegisterSession:
         if r.status_code != 200:
             raise RuntimeError(
                 f"PDF fetch HTTP {r.status_code} for doc_id={doc_id} "
-                f"({app_num})"
+                f"page={page_num} ({app_num})"
             )
-
         content = r.content
         if not content.startswith(b"%PDF"):
-            # Session might have expired mid-run; force re-warm and retry once
             self._warmed_for = None
             self.warm(app_num)
             r = self._get(path, timeout=timeout)
             content = r.content
             if not content.startswith(b"%PDF"):
                 raise RuntimeError(
-                    f"Non-PDF response for doc_id={doc_id} "
+                    f"Non-PDF response for doc_id={doc_id} page={page_num} "
                     f"(content-type={r.headers.get('Content-Type','?')}, "
                     f"first 16 bytes={content[:16]!r})"
                 )
