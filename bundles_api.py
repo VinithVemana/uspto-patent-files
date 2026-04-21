@@ -203,7 +203,7 @@ if __name__ == "__main__":
             if not patent_no:
                 print("  (no patent number — not yet granted, skipping patent.pdf)", file=sys.stderr)
                 return
-            filename       = f"US{patent_no}.pdf"
+            filename       = "Granted_document.pdf"
             needed, reason = _needs_download("patent_pdf", filename, patent_no, manifest, output_dir)
             if not needed:
                 _record_skip("patent_pdf", filename, patent_no)

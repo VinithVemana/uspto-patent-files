@@ -34,7 +34,7 @@ _CLAIMS_CODES       = {"CLM"}
 _OA_CODE_ORDER = {"CTNF": 0, "CTFR": 0, "892": 1, "FWCLM": 2, "SRFW": 3, "SRNT": 4}
 
 # Fixed order for building the middle-bundle filename in 3-bundle mode
-_MIDDLE_CODE_ORDER = ["REM", "CTNF", "CTFR", "NOA"]
+_MIDDLE_CODE_ORDER = ["REM", "CTNF", "NOA"]
 
 GOOGLE_PATENTS_HEADERS = {
     # A bare "Mozilla/5.0" UA is a known bot fingerprint and gets served a
