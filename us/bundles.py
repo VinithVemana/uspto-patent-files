@@ -98,8 +98,6 @@ def build_prosecution_bundles(app_no: str) -> list:
 
     initial_clm = _find_initial_claims(docs)
     b0_docs = [initial_clm] if initial_clm else []
-    if not oa_anchors and noa_docs:
-        b0_docs.append(noa_docs[0])
 
     bundles: list = [{
         "index":     0,
@@ -109,6 +107,13 @@ def build_prosecution_bundles(app_no: str) -> list:
     }]
 
     if not oa_anchors:
+        if noa_docs:
+            bundles.append({
+                "index":     1,
+                "label":     "NOA",
+                "type":      "round",
+                "documents": [noa_docs[0]],
+            })
         return bundles
 
     for i, oa in enumerate(oa_anchors):
@@ -201,7 +206,7 @@ def _build_three_bundles(bundles: list) -> list:
         },
         {
             "label":     middle_name,
-            "filename":  middle_name,
+            "filename":  "REM-CTNF-NOA",
             "type":      "round",
             "documents": middle_docs,
         },

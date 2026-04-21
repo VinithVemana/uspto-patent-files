@@ -49,6 +49,16 @@ def get_patent_pdf_url(patent_number: str) -> str | None:
                 matches = re.findall(pdf_regex, r.text)
                 if matches:
                     return f"https://patentimages.storage.googleapis.com/{matches[0]}"
+                # 200 but no PDF link — could be a bot-detection page; retry with backoff
+                if "We're sorry" in r.text or "automated" in r.text.lower():
+                    print(
+                        f"    Google Patents bot-detection page for "
+                        f"US{patent_number}{kind_code} (attempt {attempt + 1}/3)",
+                        file=sys.stderr,
+                    )
+                    if attempt < 2:
+                        time.sleep((attempt + 1) * 5)
+                        continue
                 break
             except requests.RequestException as exc:
                 print(
