@@ -92,6 +92,16 @@ DO NOT: derive download filenames from `bundle["label"]` with `re.sub` (produces
 Why: The server was calling `build_prosecution_bundles()` directly and sanitizing the `label` field. This bypassed `_build_three_bundles()` entirely and produced ugly, inconsistent filenames.
 How to apply: Always call `_build_three_bundles()` in server endpoints (same as CLI default mode) and use the `filename` field it returns (`initial_claims`, `REM-CTNF-NOA`, `granted_claims`) for `Content-Disposition` headers and ZIP entry names.
 
+**2026-04-21 — Silently accepted truncated EP PDFs when a mid-document page failed**
+DO NOT: break out of the page-fetch loop and return whatever pages were already merged when a page raises RuntimeError.
+Why: Cloudflare blocks a page mid-document (e.g. page 32 of 34) with a non-PDF response. The "accept partial" logic silently produced a truncated PDF (15 or 31 pages instead of 34) with no error. The user only noticed because the file size was wrong.
+How to apply: Retry each failing page individually — wait 30s, force re-warm, retry; wait 90s, retry again; only raise after 3 attempts. Never accept a partial document silently.
+
+**2026-04-21 — Misidentified EPO's own error page as a Cloudflare challenge**
+DO NOT: label any "0 documents, no HTML table" response as a "Cloudflare challenge page."
+Why: The XHTML 1.0 Transitional doctype is EPO Register's own session/rate-limit error page. Cloudflare challenge pages are HTML5 with "Just a moment…" text. Mislabeling confused the user and the error message.
+How to apply: Check response text for EPO-specific markers vs Cloudflare markers before labelling the error. Both cases mean "wait and retry" but the distinction matters for debugging.
+
 **2026-04-16 — all.zip endpoint omitted the patent PDF**
 DO NOT: build the zip from prosecution bundles alone without also fetching the full patent PDF.
 Why: The `all.zip` endpoint didn't call `_get_metadata()`, so `patent_number` was never available and `get_patent_pdf_url()` was never called. The resulting ZIP was missing `US{patent_no}.pdf`, diverging from the CLI's `--download` behavior which always writes all 3 bundle PDFs **plus** the patent PDF.
