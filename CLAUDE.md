@@ -53,7 +53,25 @@ bundles_api_ep.py    EP CLI (imports from ep/)
 bundles_server.py    FastAPI server (imports from us/ and ep/)
 us/                  USPTO core module — see us/CLAUDE.md
 ep/                  EP core module   — see ep/CLAUDE.md
+bjf/                 Barta Jones firm audit — PoA + prosecution status sweep
 ```
+
+## BJF Audit (`bjf/`)
+
+Sweeps a list of application numbers from `bjf/anorig.txt` (format: `US-18219924` per line, tab-prefixed or plain) and produces `bjf/bjf_results.xlsx` with one row per application.
+
+```bash
+python bjf/fetch_bjf_poa.py
+```
+
+Columns: `application_number`, `poa_firm`, `poa_firm_address`, `poa_attorneys`, `bjf_match`, `last_oa_code`, `last_oa_date`, `response_filed`, `response_code`, `response_date`, `noa_issued`, `noa_date`, `error`.
+
+- `bjf_match` = `"barta" in poa.lower() AND "jones" in poa.lower()` across firm + every attorney name.
+- `last_oa_*` uses `OA_TRIGGER_CODES` (CTNF, CTFR) — the most recent one wins.
+- `response_filed` = any `RESPONSE_CODES` doc filed strictly after the last OA date.
+- `noa_issued` = any `NOA_CODES` doc present in history.
+
+Reuses `us/client.py::_get_attorney()` (PoA) and `us/client.py::_get_documents()` (timeline). Logs to `bjf/bjf_fetch.log` (DEBUG+) with a tqdm bar on the console.
 
 ### API Endpoints
 

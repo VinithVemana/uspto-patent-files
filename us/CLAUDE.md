@@ -8,7 +8,7 @@ CLI entry point is `bundles_api.py` at the project root.
 | File | Purpose |
 |---|---|
 | `config.py` | API key, base URL, `HEADERS`, all document-code sets, `GOOGLE_PATENTS_HEADERS` |
-| `client.py` | `fetch_json()` (retry/backoff), `_get_metadata()`, `_get_documents()` |
+| `client.py` | `fetch_json()` (retry/backoff), `_get_metadata()`, `_get_documents()`, `_get_attorney()` |
 | `resolver.py` | Input normalization + all `resolve_*` functions |
 | `bundles.py` | `build_prosecution_bundles()`, `_build_three_bundles()`, `_doc_category()`, `_filter_docs()` |
 | `pdf.py` | `get_patent_pdf_url()`, `_merge_bundle_pdfs()`, `_merge_fwclm_pdf()` |

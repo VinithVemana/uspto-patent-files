@@ -105,3 +105,66 @@ def _get_documents(app_no: str) -> list:
 
     results.sort(key=lambda x: x["date"], reverse=True)
     return results
+
+
+def _get_attorney(app_no: str) -> dict | None:
+    """
+    Fetch power-of-attorney record for an application.
+
+    Returns a dict with:
+      - firm:            firm name from customer-number correspondence
+                         (falls back to first attorney's firm)
+      - firm_address:    multi-line address string of the firm
+      - attorneys:       list of {first, last, reg_no, firm, category}
+      - raw_text:        lowercased concatenation of every name-bearing
+                         field — use for substring searches (e.g.
+                         "barta" in raw_text and "jones" in raw_text)
+    Returns None if the API has no record.
+    """
+    data = fetch_json(f"{BASE_API}/{app_no}/attorney")
+    if not data or not data.get("patentFileWrapperDataBag"):
+        return None
+
+    record = data["patentFileWrapperDataBag"][0].get("recordAttorney") or {}
+
+    attorneys = []
+    for bag_name in ("powerOfAttorneyBag", "attorneyBag"):
+        for a in record.get(bag_name, []):
+            addr = (a.get("attorneyAddressBag") or [{}])[0]
+            attorneys.append({
+                "first":    a.get("firstName", ""),
+                "last":     a.get("lastName", ""),
+                "reg_no":   a.get("registrationNumber", ""),
+                "firm":     addr.get("nameLineOneText", ""),
+                "category": a.get("registeredPractitionerCategory", ""),
+                "source":   bag_name,
+            })
+
+    firm, firm_address = "", ""
+    cnc = record.get("customerNumberCorrespondenceData") or {}
+    cnc_addrs = cnc.get("powerOfAttorneyAddressBag") or []
+    if cnc_addrs:
+        a = cnc_addrs[0]
+        firm = a.get("nameLineOneText", "")
+        firm_address = ", ".join(filter(None, [
+            a.get("addressLineOneText", ""),
+            a.get("addressLineTwoText", ""),
+            a.get("cityName", ""),
+            a.get("geographicRegionCode", ""),
+            a.get("postalCode", ""),
+            a.get("countryName", ""),
+        ]))
+    elif attorneys:
+        firm = attorneys[0]["firm"]
+
+    raw_parts = [firm, firm_address]
+    for at in attorneys:
+        raw_parts.extend([at["first"], at["last"], at["firm"]])
+    raw_text = " | ".join(p for p in raw_parts if p).lower()
+
+    return {
+        "firm":         firm,
+        "firm_address": firm_address,
+        "attorneys":    attorneys,
+        "raw_text":     raw_text,
+    }
