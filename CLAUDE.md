@@ -18,13 +18,14 @@ python bundles_api.py US10897328B2 US10912060B2 --download --output-dir ./bulk  
 python bundles_api.py "US10897328B2,US10912060B2" --download --output-dir ./bulk  # comma-sep
 python bundles_api.py 16123456 --separate-bundles
 python bundles_api.py 18221238 --download --output-dir ./pdfs --continuations  # also pulls every CON/CIP ancestor
+python bundles_api.py 12141042 --download --output-dir ./pdfs --disclaimers    # also pulls bundles for every patent cited in an approved DISQ
 ```
 
-Key flags: `--patent`, `--separate-bundles`, `--show-extra`, `--show-intclaim`, `--download`, `--output-dir`, `--base-url`, `--text`, `--continuations`
+Key flags: `--patent`, `--separate-bundles`, `--show-extra`, `--show-intclaim`, `--download`, `--output-dir`, `--base-url`, `--text`, `--continuations`, `--disclaimers`
 
 ### `--continuations`
 
-With `--download`, calls `/continuity` for the input app and downloads bundles for every ancestor whose `claimParentageTypeCode` is in `us/config.py::CONTINUATION_FOLLOW_CODES` (default `{"CON", "CIP"}`). Each parent saves to `{output_dir or "."}/US{parent_patent_no}/` (sibling folder; falls back to bare app number when not granted).
+With `--download`, calls `/continuity` for the input app and downloads bundles for every ancestor whose `claimParentageTypeCode` is in `us/config.py::CONTINUATION_FOLLOW_CODES` (default `{"CON", "CIP"}`). Parents are sorted by `parentApplicationFilingDate` ascending (oldest first). Each parent saves to `{output_dir or "."}/{NN}_US{parent_patent_no}/` where `NN` is the chronological order (zero-padded; falls back to bare app number when not granted).
 
 Bundle types per parent controlled by `us/config.py::CONTINUATION_BUNDLES` — list, edit to taste:
 - `"initial"` → `Initial_claims.pdf`
@@ -32,6 +33,20 @@ Bundle types per parent controlled by `us/config.py::CONTINUATION_BUNDLES` — l
 - `"granted"` → `Granted_claims.pdf`
 
 USPTO `/continuity` returns the **full ancestor chain** (not just direct parent), so one call covers the whole tree — no recursion needed.
+
+### `--disclaimers`
+
+With `--download`, OCRs every Terminal Disclaimer review decision (`DISQ` doc code) on the input application. For each **approved** disclaimer, extracts the cited prior US patent numbers and downloads the bundle types in `us/config.py::DISCLAIMER_BUNDLES` (default `["middle"]` → `REM-CTNF-NOA.pdf`) for every cited patent.
+
+Each cited patent saves to `{output_dir or "."}/TD_{NN}_US{patent_no}/` (mirrors continuation layout, with `TD_` prefix to distinguish). Manifest skip logic identical to continuations.
+
+DISQ forms are scanned PTOL forms (image-only PDFs), so this requires **OCR**:
+- `pdftoppm` (poppler) — converts PDF pages to PNG
+- `tesseract` — OCRs the PNGs
+
+Both must be on `PATH` (`brew install poppler tesseract` on macOS). Implementation lives in `us/disclaimer.py`.
+
+Approval detection looks for "TDs approved" / "TDs disapproved" footer text first, then falls back to checkbox-style `[x] APPROVED`. Disapproved decisions are skipped.
 
 **EP CLI:**
 ```bash

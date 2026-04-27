@@ -50,6 +50,14 @@ CONTINUATION_FOLLOW_CODES = {"CON", "CIP"}
 #   "granted"  →  Granted_claims.pdf
 CONTINUATION_BUNDLES = ["middle"]
 
+# ---------------------------------------------------------------------------
+# Terminal Disclaimer download settings  (--disclaimers)
+# ---------------------------------------------------------------------------
+
+# Bundle types to download for each prior patent cited in an APPROVED
+# Terminal Disclaimer (DISQ) decision. Same keys as CONTINUATION_BUNDLES.
+DISCLAIMER_BUNDLES = ["middle"]
+
 GOOGLE_PATENTS_HEADERS = {
     # A bare "Mozilla/5.0" UA is a known bot fingerprint and gets served a
     # 503 "We're sorry... automated queries" page. A full Chrome UA plus the

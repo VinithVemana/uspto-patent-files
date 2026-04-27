@@ -13,6 +13,7 @@ CLI entry point is `bundles_api.py` at the project root.
 | `bundles.py` | `build_prosecution_bundles()`, `_build_three_bundles()`, `_doc_category()`, `_filter_docs()` |
 | `pdf.py` | `get_patent_pdf_url()`, `_merge_bundle_pdfs()`, `_merge_fwclm_pdf()` |
 | `manifest.py` | `_doc_fingerprint()`, `_load_manifest()`, `_save_manifest()`, `_needs_download()` |
+| `disclaimer.py` | OCR + parse Terminal Disclaimer (`DISQ`) decisions: `get_disq_decisions()`, `parse_disq_text()`, `_ocr_pdf_url()` (shells out to `pdftoppm` + `tesseract`) |
 
 ## Data Flow
 
@@ -59,6 +60,14 @@ Codes are bucketed into sets in `config.py`:
 `bundles_api._process_continuations()` iterates parents, builds 3-bundle layout, and downloads only the types listed in `config.CONTINUATION_BUNDLES` (default `["middle"]` = REM-CTNF-NOA). Each parent gets its own `US{patent_no}/` sibling folder under the parent of the main output dir, with its own `manifest.json` for skip logic.
 
 Edit `config.CONTINUATION_BUNDLES` to add `"initial"` or `"granted"` to also pull initial/granted claims for parents.
+
+## Terminal Disclaimer Downloads (`--disclaimers`)
+
+`disclaimer.get_disq_decisions(app_no)` filters `_get_documents()` for `code == "DISQ"`, OCRs each PDF (`pdftoppm` -r 300 + `tesseract`), and returns `[{date, pdf_url, approved, patents}]`. `parse_disq_text()` detects approval via "TDs approved/disapproved" footer or `[x] APPROVED` checkbox, and extracts US patent numbers via the `\d{1,2},\d{3},\d{3}` regex (with bare-digit fallback).
+
+`bundles_api._process_disclaimers()` iterates approved disclaimers, de-dupes cited patents, resolves each via `resolve_patent_to_application()`, builds 3-bundle layout, and downloads only the types in `config.DISCLAIMER_BUNDLES` (default `["middle"]`). Each cited patent gets `{base_dir}/TD_{NN}_US{patent_no}/` with its own `manifest.json`. Disapproved decisions are skipped.
+
+OCR binaries must be on PATH — install via `brew install poppler tesseract`.
 
 ## Manifest Skip Logic (`manifest.py`)
 

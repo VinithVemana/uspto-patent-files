@@ -38,7 +38,14 @@ RUN FROM THE COMMAND LINE
       --separate-bundles  One PDF per prosecution round (default: 3-bundle collapse)
       --continuations     Also download bundles for every CON/CIP ancestor
                           (types controlled by us/config.py CONTINUATION_BUNDLES)
+      --disclaimers       OCR every DISQ decision; for each approved Terminal
+                          Disclaimer download bundles for every cited prior
+                          patent (types controlled by DISCLAIMER_BUNDLES).
+                          Requires pdftoppm + tesseract on PATH.
       --base-url URL      Base URL for download_url links (default: http://localhost:7901)
+
+      python bundles_api.py 18221238 --download --output-dir ./pdfs --continuations
+      python bundles_api.py 12141042 --download --output-dir ./pdfs --disclaimers
 
 WEB SERVER
 ----------
@@ -47,7 +54,7 @@ WEB SERVER
 
 # Re-export the full public surface so bundles_server.py can keep its
 # existing `from bundles_api import (...)` import unchanged.
-from us.config import HEADERS, GOOGLE_PATENTS_HEADERS, CONTINUATION_BUNDLES
+from us.config import HEADERS, GOOGLE_PATENTS_HEADERS, CONTINUATION_BUNDLES, DISCLAIMER_BUNDLES
 from us.client import fetch_json, _get_metadata, _get_documents, _get_continuity
 from us.resolver import (
     resolve_application_number,
@@ -56,6 +63,7 @@ from us.resolver import (
     _extract_patent_digits,
     _is_publication_number,
 )
+from us.disclaimer import get_disq_decisions
 from us.bundles import (
     build_prosecution_bundles,
     _build_three_bundles,
@@ -284,6 +292,8 @@ if __name__ == "__main__":
                     _finalize_manifest()
                 if args.download and args.continuations:
                     _process_continuations(app_no, args.output_dir or ".")
+                if args.download and args.disclaimers:
+                    _process_disclaimers(app_no, args.output_dir or ".")
                 return True
 
             # Text output
@@ -326,6 +336,8 @@ if __name__ == "__main__":
                 _finalize_manifest()
             if args.download and args.continuations:
                 _process_continuations(app_no, args.output_dir or ".")
+            if args.download and args.disclaimers:
+                _process_disclaimers(app_no, args.output_dir or ".")
             return True
 
         # ============================================================== DEFAULT: 3-bundle mode
@@ -415,6 +427,8 @@ if __name__ == "__main__":
 
         if args.download and args.continuations:
             _process_continuations(app_no, args.output_dir or ".")
+        if args.download and args.disclaimers:
+            _process_disclaimers(app_no, args.output_dir or ".")
         return True
 
     # ------------------------------------------------------------------
@@ -428,20 +442,28 @@ if __name__ == "__main__":
             print("  No continuation parents found.", file=sys.stderr)
             return
 
+        # Oldest parent first — order matches actual ancestor chain.
+        # Empty filing_date sorts last so dated entries always come first.
+        parents.sort(key=lambda p: p.get("filing_date") or "9999-99-99")
+        width = max(2, len(str(len(parents))))
+
         _BUNDLE_TYPE = {"initial": "initial", "middle": "round", "granted": "granted"}
         wanted_types = {_BUNDLE_TYPE[k] for k in CONTINUATION_BUNDLES if k in _BUNDLE_TYPE}
 
-        print(f"\n  Continuation parents ({len(parents)}):", file=sys.stderr)
-        for p in parents:
-            print(f"    {p['relationship']}: {p['app_no']}"
-                  f"  patent={p['patent_no'] or 'N/A'}  [{p['status']}]", file=sys.stderr)
+        print(f"\n  Continuation parents ({len(parents)}, oldest first):", file=sys.stderr)
+        for i, p in enumerate(parents, 1):
+            print(f"    {i:0{width}d}. {p['relationship']}: {p['app_no']}"
+                  f"  filed={p['filing_date'] or 'N/A'}"
+                  f"  patent={p['patent_no'] or 'N/A'}  [{p['status']}]",
+                  file=sys.stderr)
         print(file=sys.stderr)
 
-        for p in parents:
+        for i, p in enumerate(parents, 1):
             parent_app = p["app_no"]
             if not parent_app:
                 continue
-            subdir     = f"US{p['patent_no']}" if p["patent_no"] else parent_app
+            base_name  = f"US{p['patent_no']}" if p["patent_no"] else parent_app
+            subdir     = f"{i:0{width}d}_{base_name}"
             cont_dir   = os.path.join(base_dir, subdir)
             print(f"[Continuation] {p['relationship']}: {parent_app} → {cont_dir}",
                   file=sys.stderr)
@@ -491,6 +513,107 @@ if __name__ == "__main__":
             _save_manifest(cont_dir, parent_app, artifact_state, failures)
 
     # ------------------------------------------------------------------
+    def _process_disclaimers(app_no: str, base_dir: str) -> None:
+        """
+        For each APPROVED Terminal Disclaimer (DISQ) on app_no, download the
+        bundle types in DISCLAIMER_BUNDLES for every cited prior patent.
+
+        Folder layout: {base_dir}/TD_{NN}_US{patent_no}/
+        Mirrors continuation structure (numeric prefix + manifest).
+        """
+        decisions = get_disq_decisions(app_no)
+        if not decisions:
+            print("  No DISQ documents found.", file=sys.stderr)
+            return
+
+        # Collect approved cited patents (de-dup, preserve order across DISQs).
+        cited: list[str] = []
+        approved_count = 0
+        for dec in decisions:
+            if dec["approved"] is not True:
+                print(f"  [DISQ {dec['date'][:10]}] approved={dec['approved']} — skipping",
+                      file=sys.stderr)
+                continue
+            approved_count += 1
+            for pn in dec["patents"]:
+                if pn not in cited:
+                    cited.append(pn)
+
+        if not cited:
+            print("  No approved Terminal Disclaimers with cited patents.", file=sys.stderr)
+            return
+
+        _BUNDLE_TYPE = {"initial": "initial", "middle": "round", "granted": "granted"}
+        wanted_types = {_BUNDLE_TYPE[k] for k in DISCLAIMER_BUNDLES if k in _BUNDLE_TYPE}
+
+        width = max(2, len(str(len(cited))))
+        print(f"\n  Terminal Disclaimer cited patents ({len(cited)} from "
+              f"{approved_count} approved DISQ):", file=sys.stderr)
+        for i, pn in enumerate(cited, 1):
+            print(f"    {i:0{width}d}. US{pn}", file=sys.stderr)
+        print(file=sys.stderr)
+
+        for i, patent_no in enumerate(cited, 1):
+            print(f"[Disclaimer] US{patent_no}", file=sys.stderr)
+            try:
+                td_app = resolve_patent_to_application(patent_no)
+            except Exception as exc:
+                print(f"  resolve failed: {exc}", file=sys.stderr)
+                continue
+            if not td_app:
+                print(f"  Could not resolve US{patent_no} to an application number — skipping",
+                      file=sys.stderr)
+                continue
+
+            subdir   = f"TD_{i:0{width}d}_US{patent_no}"
+            td_dir   = os.path.join(base_dir, subdir)
+            print(f"  app={td_app} → {td_dir}", file=sys.stderr)
+
+            try:
+                td_bundles = build_prosecution_bundles(td_app)
+                if not td_bundles:
+                    print(f"  No prosecution docs for {td_app}", file=sys.stderr)
+                    continue
+            except Exception as exc:
+                print(f"  ERROR fetching {td_app}: {exc}", file=sys.stderr)
+                continue
+
+            three           = _build_three_bundles(td_bundles)
+            os.makedirs(td_dir, exist_ok=True)
+            td_manifest     = _load_manifest(td_dir)
+            artifact_state: dict = {}
+            failures:       list = []
+
+            for b in three:
+                if b["type"] not in wanted_types or not b["documents"]:
+                    continue
+                key      = f"bundle_{b['type']}"
+                filename = f"{b['filename']}.pdf"
+                fp       = _doc_fingerprint(b["documents"])
+                needed, reason = _needs_download(key, filename, fp, td_manifest, td_dir)
+                if not needed:
+                    artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                    continue
+                print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+                filepath = os.path.join(td_dir, filename)
+                try:
+                    pdf = _merge_bundle_pdfs(
+                        {"type": b["type"], "documents": b["documents"]},
+                        show_extra=False, show_intclaim=False,
+                    )
+                    with open(filepath, "wb") as fh:
+                        fh.write(pdf.getvalue())
+                    size_kb = os.path.getsize(filepath) // 1024
+                    print(f"  -> Saved {filename} ({size_kb:,} KB)", file=sys.stderr)
+                    artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
+                except Exception as exc:
+                    print(f"  -> Failed: {exc}", file=sys.stderr)
+                    failures.append({"key": key, "filename": filename, "reason": str(exc)})
+
+            _save_manifest(td_dir, td_app, artifact_state, failures)
+
+    # ------------------------------------------------------------------
     parser = argparse.ArgumentParser(
         description="Fetch prosecution bundles for a USPTO application (JSON output by default).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -516,6 +639,11 @@ Examples:
   # Also download REM-CTNF-NOA (and/or other bundles per us/config.py) for every
   # continuation/CIP ancestor, into sibling US{parent_patent_no}/ folders.
   python bundles_api.py 18221238 --download --output-dir ./pdfs --continuations
+
+  # Also OCR every DISQ (Terminal Disclaimer decision); for each approved one,
+  # pull REM-CTNF-NOA (per DISCLAIMER_BUNDLES) for every cited prior patent
+  # into sibling TD_NN_US{patent_no}/ folders.
+  python bundles_api.py 12141042 --download --output-dir ./pdfs --disclaimers
         """,
     )
     parser.add_argument(
@@ -545,6 +673,12 @@ Examples:
                         help="Also download bundles for every continuation/CIP ancestor "
                              "(types in us/config.py CONTINUATION_BUNDLES). Saves each parent "
                              "to a sibling US{patent_no}/ folder.")
+    parser.add_argument("--disclaimers",      action="store_true",
+                        help="Also OCR every Terminal Disclaimer (DISQ) decision; for each "
+                             "approved disclaimer download bundles for every cited prior "
+                             "patent (types in us/config.py DISCLAIMER_BUNDLES). Saves each "
+                             "to a sibling TD_NN_US{patent_no}/ folder. Requires pdftoppm "
+                             "and tesseract on PATH.")
     args = parser.parse_args()
 
     # Flatten all tokens — split on commas and pipes so any separator style works
