@@ -44,8 +44,8 @@ RUN FROM THE COMMAND LINE
                           Requires pdftoppm + tesseract on PATH.
       --base-url URL      Base URL for download_url links (default: http://localhost:7901)
 
-      python bundles_api.py 18221238 --download --output-dir ./pdfs --continuations
-      python bundles_api.py 12141042 --download --output-dir ./pdfs --disclaimers
+      python bundles_api.py 18221238 --download  --continuations
+      python bundles_api.py 12141042 --download  --disclaimers
 
 WEB SERVER
 ----------
@@ -293,7 +293,7 @@ if __name__ == "__main__":
                 if args.download and args.continuations:
                     _process_continuations(app_no, args.output_dir or ".")
                 if args.download and args.disclaimers:
-                    _process_disclaimers(app_no, args.output_dir or ".")
+                    _process_disclaimers(app_no, output_dir)
                 return True
 
             # Text output
@@ -337,7 +337,7 @@ if __name__ == "__main__":
             if args.download and args.continuations:
                 _process_continuations(app_no, args.output_dir or ".")
             if args.download and args.disclaimers:
-                _process_disclaimers(app_no, args.output_dir or ".")
+                _process_disclaimers(app_no, output_dir)
             return True
 
         # ============================================================== DEFAULT: 3-bundle mode
@@ -388,6 +388,8 @@ if __name__ == "__main__":
                 _finalize_manifest()
             if args.download and args.continuations:
                 _process_continuations(app_no, args.output_dir or ".")
+            if args.download and args.disclaimers:
+                _process_disclaimers(app_no, output_dir)
             return True
 
         # Text output
@@ -428,7 +430,7 @@ if __name__ == "__main__":
         if args.download and args.continuations:
             _process_continuations(app_no, args.output_dir or ".")
         if args.download and args.disclaimers:
-            _process_disclaimers(app_no, args.output_dir or ".")
+            _process_disclaimers(app_no, output_dir)
         return True
 
     # ------------------------------------------------------------------
