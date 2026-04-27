@@ -17,9 +17,21 @@ python bundles_api.py 16123456 --text
 python bundles_api.py US10897328B2 US10912060B2 --download --output-dir ./bulk  # bulk
 python bundles_api.py "US10897328B2,US10912060B2" --download --output-dir ./bulk  # comma-sep
 python bundles_api.py 16123456 --separate-bundles
+python bundles_api.py 18221238 --download --output-dir ./pdfs --continuations  # also pulls every CON/CIP ancestor
 ```
 
-Key flags: `--patent`, `--separate-bundles`, `--show-extra`, `--show-intclaim`, `--download`, `--output-dir`, `--base-url`, `--text`
+Key flags: `--patent`, `--separate-bundles`, `--show-extra`, `--show-intclaim`, `--download`, `--output-dir`, `--base-url`, `--text`, `--continuations`
+
+### `--continuations`
+
+With `--download`, calls `/continuity` for the input app and downloads bundles for every ancestor whose `claimParentageTypeCode` is in `us/config.py::CONTINUATION_FOLLOW_CODES` (default `{"CON", "CIP"}`). Each parent saves to `{output_dir or "."}/US{parent_patent_no}/` (sibling folder; falls back to bare app number when not granted).
+
+Bundle types per parent controlled by `us/config.py::CONTINUATION_BUNDLES` — list, edit to taste:
+- `"initial"` → `Initial_claims.pdf`
+- `"middle"`  → `REM-CTNF-NOA.pdf` (default)
+- `"granted"` → `Granted_claims.pdf`
+
+USPTO `/continuity` returns the **full ancestor chain** (not just direct parent), so one call covers the whole tree — no recursion needed.
 
 **EP CLI:**
 ```bash

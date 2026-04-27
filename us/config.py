@@ -36,6 +36,20 @@ _OA_CODE_ORDER = {"CTNF": 0, "CTFR": 0, "892": 1, "FWCLM": 2, "SRFW": 3, "SRNT":
 # Fixed order for building the middle-bundle filename in 3-bundle mode
 _MIDDLE_CODE_ORDER = ["REM", "CTNF", "NOA"]
 
+# ---------------------------------------------------------------------------
+# Continuation download settings  (edit these to change --continuations behavior)
+# ---------------------------------------------------------------------------
+
+# Parentage-type codes to follow when --continuations is used.
+# CON = Continuation, CIP = Continuation-in-Part, DIV = Divisional
+CONTINUATION_FOLLOW_CODES = {"CON", "CIP"}
+
+# Which of the 3 prosecution bundles to download for each continuation parent.
+#   "initial"  →  Initial_claims.pdf
+#   "middle"   →  REM-CTNF-NOA.pdf
+#   "granted"  →  Granted_claims.pdf
+CONTINUATION_BUNDLES = ["middle"]
+
 GOOGLE_PATENTS_HEADERS = {
     # A bare "Mozilla/5.0" UA is a known bot fingerprint and gets served a
     # 503 "We're sorry... automated queries" page. A full Chrome UA plus the

@@ -6,7 +6,7 @@ import time
 
 import requests
 
-from .config import BASE_API, HEADERS
+from .config import BASE_API, HEADERS, CONTINUATION_FOLLOW_CODES
 
 
 def fetch_json(url: str) -> dict | None:
@@ -104,6 +104,33 @@ def _get_documents(app_no: str) -> list:
         })
 
     results.sort(key=lambda x: x["date"], reverse=True)
+    return results
+
+
+def _get_continuity(app_no: str) -> list[dict]:
+    """
+    Returns the full ancestor chain for app_no, filtered to CONTINUATION_FOLLOW_CODES.
+
+    Each entry: {app_no, patent_no, filing_date, relationship, status, child_app_no}
+    The USPTO API returns all ancestors (not just the direct parent), so one call
+    gives the entire chain back to the root.
+    """
+    data = fetch_json(f"{BASE_API}/{app_no}/continuity")
+    if not data or not data.get("patentFileWrapperDataBag"):
+        return []
+    bag = data["patentFileWrapperDataBag"][0]
+    results = []
+    for entry in bag.get("parentContinuityBag", []):
+        if entry.get("claimParentageTypeCode") not in CONTINUATION_FOLLOW_CODES:
+            continue
+        results.append({
+            "app_no":       entry.get("parentApplicationNumberText", ""),
+            "patent_no":    entry.get("parentPatentNumber", ""),
+            "filing_date":  entry.get("parentApplicationFilingDate", ""),
+            "relationship": entry.get("claimParentageTypeCodeDescriptionText", ""),
+            "status":       entry.get("parentApplicationStatusDescriptionText", ""),
+            "child_app_no": entry.get("childApplicationNumberText", ""),
+        })
     return results
 
 

@@ -8,7 +8,7 @@ CLI entry point is `bundles_api.py` at the project root.
 | File | Purpose |
 |---|---|
 | `config.py` | API key, base URL, `HEADERS`, all document-code sets, `GOOGLE_PATENTS_HEADERS` |
-| `client.py` | `fetch_json()` (retry/backoff), `_get_metadata()`, `_get_documents()`, `_get_attorney()` |
+| `client.py` | `fetch_json()` (retry/backoff), `_get_metadata()`, `_get_documents()`, `_get_attorney()`, `_get_continuity()` |
 | `resolver.py` | Input normalization + all `resolve_*` functions |
 | `bundles.py` | `build_prosecution_bundles()`, `_build_three_bundles()`, `_doc_category()`, `_filter_docs()` |
 | `pdf.py` | `get_patent_pdf_url()`, `_merge_bundle_pdfs()`, `_merge_fwclm_pdf()` |
@@ -51,6 +51,14 @@ Codes are bucketed into sets in `config.py`:
 | `US20210367709A1` | pub kind code (A1/A2/A9) → publication lookup |
 | `11973593` | try application first; fallback to patent lookup |
 | `11973593 --patent` | force patent lookup |
+
+## Continuation Downloads (`--continuations`)
+
+`client._get_continuity(app_no)` calls `/continuity` and returns parents whose `claimParentageTypeCode` is in `config.CONTINUATION_FOLLOW_CODES` (default `{"CON", "CIP"}`). USPTO returns the full ancestor chain, so one call covers everything.
+
+`bundles_api._process_continuations()` iterates parents, builds 3-bundle layout, and downloads only the types listed in `config.CONTINUATION_BUNDLES` (default `["middle"]` = REM-CTNF-NOA). Each parent gets its own `US{patent_no}/` sibling folder under the parent of the main output dir, with its own `manifest.json` for skip logic.
+
+Edit `config.CONTINUATION_BUNDLES` to add `"initial"` or `"granted"` to also pull initial/granted claims for parents.
 
 ## Manifest Skip Logic (`manifest.py`)
 

@@ -36,6 +36,8 @@ RUN FROM THE COMMAND LINE
       --download          Download each bundle as a merged PDF to disk
       --output-dir DIR    Where to save PDFs (default: ./{app_no}/)
       --separate-bundles  One PDF per prosecution round (default: 3-bundle collapse)
+      --continuations     Also download bundles for every CON/CIP ancestor
+                          (types controlled by us/config.py CONTINUATION_BUNDLES)
       --base-url URL      Base URL for download_url links (default: http://localhost:7901)
 
 WEB SERVER
@@ -45,8 +47,8 @@ WEB SERVER
 
 # Re-export the full public surface so bundles_server.py can keep its
 # existing `from bundles_api import (...)` import unchanged.
-from us.config import HEADERS, GOOGLE_PATENTS_HEADERS
-from us.client import fetch_json, _get_metadata, _get_documents
+from us.config import HEADERS, GOOGLE_PATENTS_HEADERS, CONTINUATION_BUNDLES
+from us.client import fetch_json, _get_metadata, _get_documents, _get_continuity
 from us.resolver import (
     resolve_application_number,
     resolve_patent_to_application,
@@ -280,6 +282,8 @@ if __name__ == "__main__":
                     _download_patent_pdf_smart()
                     _download_index_smart()
                     _finalize_manifest()
+                if args.download and args.continuations:
+                    _process_continuations(app_no, args.output_dir or ".")
                 return True
 
             # Text output
@@ -320,6 +324,8 @@ if __name__ == "__main__":
                 _download_patent_pdf_smart()
                 _download_index_smart()
                 _finalize_manifest()
+            if args.download and args.continuations:
+                _process_continuations(app_no, args.output_dir or ".")
             return True
 
         # ============================================================== DEFAULT: 3-bundle mode
@@ -368,6 +374,8 @@ if __name__ == "__main__":
                 _download_patent_pdf_smart()
                 _download_index_smart()
                 _finalize_manifest()
+            if args.download and args.continuations:
+                _process_continuations(app_no, args.output_dir or ".")
             return True
 
         # Text output
@@ -405,7 +413,82 @@ if __name__ == "__main__":
             _download_index_smart()
             _finalize_manifest()
 
+        if args.download and args.continuations:
+            _process_continuations(app_no, args.output_dir or ".")
         return True
+
+    # ------------------------------------------------------------------
+    def _process_continuations(app_no: str, base_dir: str) -> None:
+        """
+        For each continuation/CIP ancestor of app_no, download the bundle types
+        listed in CONTINUATION_BUNDLES into base_dir/US{patent_no}/.
+        """
+        parents = _get_continuity(app_no)
+        if not parents:
+            print("  No continuation parents found.", file=sys.stderr)
+            return
+
+        _BUNDLE_TYPE = {"initial": "initial", "middle": "round", "granted": "granted"}
+        wanted_types = {_BUNDLE_TYPE[k] for k in CONTINUATION_BUNDLES if k in _BUNDLE_TYPE}
+
+        print(f"\n  Continuation parents ({len(parents)}):", file=sys.stderr)
+        for p in parents:
+            print(f"    {p['relationship']}: {p['app_no']}"
+                  f"  patent={p['patent_no'] or 'N/A'}  [{p['status']}]", file=sys.stderr)
+        print(file=sys.stderr)
+
+        for p in parents:
+            parent_app = p["app_no"]
+            if not parent_app:
+                continue
+            subdir     = f"US{p['patent_no']}" if p["patent_no"] else parent_app
+            cont_dir   = os.path.join(base_dir, subdir)
+            print(f"[Continuation] {p['relationship']}: {parent_app} → {cont_dir}",
+                  file=sys.stderr)
+
+            try:
+                parent_bundles = build_prosecution_bundles(parent_app)
+                if not parent_bundles:
+                    print(f"  No prosecution docs for {parent_app}", file=sys.stderr)
+                    continue
+            except Exception as exc:
+                print(f"  ERROR fetching {parent_app}: {exc}", file=sys.stderr)
+                continue
+
+            three           = _build_three_bundles(parent_bundles)
+            os.makedirs(cont_dir, exist_ok=True)
+            cont_manifest   = _load_manifest(cont_dir)
+            artifact_state: dict = {}
+            failures:       list = []
+
+            for b in three:
+                if b["type"] not in wanted_types or not b["documents"]:
+                    continue
+                key      = f"bundle_{b['type']}"
+                filename = f"{b['filename']}.pdf"
+                fp       = _doc_fingerprint(b["documents"])
+                needed, reason = _needs_download(key, filename, fp, cont_manifest, cont_dir)
+                if not needed:
+                    artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                    continue
+                print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+                filepath = os.path.join(cont_dir, filename)
+                try:
+                    pdf = _merge_bundle_pdfs(
+                        {"type": b["type"], "documents": b["documents"]},
+                        show_extra=False, show_intclaim=False,
+                    )
+                    with open(filepath, "wb") as fh:
+                        fh.write(pdf.getvalue())
+                    size_kb = os.path.getsize(filepath) // 1024
+                    print(f"  -> Saved {filename} ({size_kb:,} KB)", file=sys.stderr)
+                    artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
+                except Exception as exc:
+                    print(f"  -> Failed: {exc}", file=sys.stderr)
+                    failures.append({"key": key, "filename": filename, "reason": str(exc)})
+
+            _save_manifest(cont_dir, parent_app, artifact_state, failures)
 
     # ------------------------------------------------------------------
     parser = argparse.ArgumentParser(
@@ -429,6 +512,10 @@ Examples:
   python bundles_api.py 16123456 --separate-bundles
   python bundles_api.py 16123456 --separate-bundles --show-extra --show-intclaim
   python bundles_api.py 16123456 --separate-bundles --download --output-dir ./pdfs
+
+  # Also download REM-CTNF-NOA (and/or other bundles per us/config.py) for every
+  # continuation/CIP ancestor, into sibling US{parent_patent_no}/ folders.
+  python bundles_api.py 18221238 --download --output-dir ./pdfs --continuations
         """,
     )
     parser.add_argument(
@@ -454,6 +541,10 @@ Examples:
                         help="Force input to be treated as a patent grant number")
     parser.add_argument("--text",             action="store_true",
                         help="Print a human-readable text table instead of JSON")
+    parser.add_argument("--continuations",    action="store_true",
+                        help="Also download bundles for every continuation/CIP ancestor "
+                             "(types in us/config.py CONTINUATION_BUNDLES). Saves each parent "
+                             "to a sibling US{patent_no}/ folder.")
     args = parser.parse_args()
 
     # Flatten all tokens — split on commas and pipes so any separator style works
