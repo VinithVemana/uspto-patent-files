@@ -65,7 +65,7 @@ Edit `config.CONTINUATION_BUNDLES` to add `"initial"` or `"granted"` to also pul
 
 `disclaimer.get_disq_decisions(app_no)` filters `_get_documents()` for `code == "DISQ"`, OCRs each PDF (`pdftoppm` -r 300 + `tesseract`), and returns `[{date, pdf_url, approved, patents}]`. `parse_disq_text()` detects approval via "TDs approved/disapproved" footer or `[x] APPROVED` checkbox, and extracts US patent numbers via the `\d{1,2},\d{3},\d{3}` regex (with bare-digit fallback).
 
-`bundles_api._process_disclaimers()` iterates approved disclaimers, de-dupes cited patents, resolves each via `resolve_patent_to_application()`, builds 3-bundle layout, and downloads only the types in `config.DISCLAIMER_BUNDLES` (default `["middle"]`). Each cited patent gets `{base_dir}/TD_{NN}_US{patent_no}/` with its own `manifest.json`. Disapproved decisions are skipped.
+`bundles_api._process_disclaimers()` iterates approved disclaimers, de-dupes cited patents, resolves each via `resolve_patent_to_application()`, builds 3-bundle layout, and downloads only the types in `config.DISCLAIMER_BUNDLES` (default `["middle"]`). Each cited patent gets `{output_dir}/TD_{NN}_US{patent_no}/` — nested **inside** the input patent's output folder, alongside its main bundle PDFs — with its own `manifest.json`. Disapproved decisions are skipped.
 
 OCR binaries must be on PATH — install via `brew install poppler tesseract`.
 

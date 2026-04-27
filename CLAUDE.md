@@ -38,7 +38,19 @@ USPTO `/continuity` returns the **full ancestor chain** (not just direct parent)
 
 With `--download`, OCRs every Terminal Disclaimer review decision (`DISQ` doc code) on the input application. For each **approved** disclaimer, extracts the cited prior US patent numbers and downloads the bundle types in `us/config.py::DISCLAIMER_BUNDLES` (default `["middle"]` → `REM-CTNF-NOA.pdf`) for every cited patent.
 
-Each cited patent saves to `{output_dir or "."}/TD_{NN}_US{patent_no}/` (mirrors continuation layout, with `TD_` prefix to distinguish). Manifest skip logic identical to continuations.
+Each cited patent saves to `{patent_output_dir}/TD_{NN}_US{patent_no}/` — i.e. **nested inside the input patent's own output folder**, alongside its main bundle PDFs. So a default run with no `--output-dir` produces:
+
+```
+US{patent_no}/
+  Initial_claims.pdf
+  REM-CTNF-NOA.pdf
+  Granted_document.pdf
+  TD_01_US{cited1}/REM-CTNF-NOA.pdf
+  TD_02_US{cited2}/REM-CTNF-NOA.pdf
+  ...
+```
+
+Manifest skip logic identical to continuations.
 
 DISQ forms are scanned PTOL forms (image-only PDFs), so this requires **OCR**:
 - `pdftoppm` (poppler) — converts PDF pages to PNG
