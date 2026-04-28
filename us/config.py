@@ -44,11 +44,13 @@ _MIDDLE_CODE_ORDER = ["REM", "CTNF", "NOA"]
 # CON = Continuation, CIP = Continuation-in-Part, DIV = Divisional
 CONTINUATION_FOLLOW_CODES = {"CON", "CIP"}
 
-# Which of the 3 prosecution bundles to download for each continuation parent.
-#   "initial"  →  Initial_claims.pdf
-#   "middle"   →  REM-CTNF-NOA.pdf
-#   "granted"  →  Granted_claims.pdf
-CONTINUATION_BUNDLES = ["middle"]
+# Bundle types to download for each continuation parent. Files land in the
+# same folder as the input patent's bundles, suffixed with _parent_{NN}:
+#   "initial"          →  Initial_claims_parent_{NN}.pdf
+#   "middle"           →  REM-CTNF-NOA_parent_{NN}.pdf
+#   "granted"          →  Granted_claims_parent_{NN}.pdf
+#   "granted_document" →  Granted_document_parent_{NN}.pdf  (full Google Patents PDF)
+CONTINUATION_BUNDLES = ["middle", "granted_document"]
 
 # ---------------------------------------------------------------------------
 # Terminal Disclaimer download settings  (--disclaimers)
@@ -56,7 +58,12 @@ CONTINUATION_BUNDLES = ["middle"]
 
 # Bundle types to download for each prior patent cited in an APPROVED
 # Terminal Disclaimer (DISQ) decision. Same keys as CONTINUATION_BUNDLES.
-DISCLAIMER_BUNDLES = ["middle"]
+# Files land in the same folder, suffixed with _TD_{NN}:
+#   "initial"          →  Initial_claims_TD_{NN}.pdf
+#   "middle"           →  REM-CTNF-NOA_TD_{NN}.pdf
+#   "granted"          →  Granted_claims_TD_{NN}.pdf
+#   "granted_document" →  Granted_document_TD_{NN}.pdf
+DISCLAIMER_BUNDLES = ["middle", "granted_document"]
 
 GOOGLE_PATENTS_HEADERS = {
     # A bare "Mozilla/5.0" UA is a known bot fingerprint and gets served a

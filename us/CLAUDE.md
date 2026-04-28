@@ -57,17 +57,33 @@ Codes are bucketed into sets in `config.py`:
 
 `client._get_continuity(app_no)` calls `/continuity` and returns parents whose `claimParentageTypeCode` is in `config.CONTINUATION_FOLLOW_CODES` (default `{"CON", "CIP"}`). USPTO returns the full ancestor chain, so one call covers everything.
 
-`bundles_api._process_continuations()` iterates parents, builds 3-bundle layout, and downloads only the types listed in `config.CONTINUATION_BUNDLES` (default `["middle"]` = REM-CTNF-NOA). Each parent gets its own `US{patent_no}/` sibling folder under the parent of the main output dir, with its own `manifest.json` for skip logic.
+`bundles_api._process_continuations()` sorts parents by `parentApplicationFilingDate` **descending** (newest first), builds 3-bundle layout for each, and downloads only the types listed in `config.CONTINUATION_BUNDLES` (default `["middle", "granted_document"]`). All parent files land **directly in the input patent's output folder** (no subfolders), suffixed `_parent_{NN}`:
 
-Edit `config.CONTINUATION_BUNDLES` to add `"initial"` or `"granted"` to also pull initial/granted claims for parents.
+- `"initial"`          → `Initial_claims_parent_{NN}.pdf`
+- `"middle"`           → `REM-CTNF-NOA_parent_{NN}.pdf`
+- `"granted"`          → `Granted_claims_parent_{NN}.pdf`
+- `"granted_document"` → `Granted_document_parent_{NN}.pdf` (full Google Patents PDF)
+
+The function takes the shared `manifest`, `artifact_state`, `failures` from `_process_one_patent` and updates them in place — there is **one** `manifest.json` in the input patent's folder, no per-parent manifests.
 
 ## Terminal Disclaimer Downloads (`--disclaimers`)
 
 `disclaimer.get_disq_decisions(app_no)` filters `_get_documents()` for `code == "DISQ"`, OCRs each PDF (`pdftoppm` -r 300 + `tesseract`), and returns `[{date, pdf_url, approved, patents}]`. `parse_disq_text()` detects approval via "TDs approved/disapproved" footer or `[x] APPROVED` checkbox, and extracts US patent numbers via the `\d{1,2},\d{3},\d{3}` regex (with bare-digit fallback).
 
-`bundles_api._process_disclaimers()` iterates approved disclaimers, de-dupes cited patents, resolves each via `resolve_patent_to_application()`, builds 3-bundle layout, and downloads only the types in `config.DISCLAIMER_BUNDLES` (default `["middle"]`). Each cited patent gets `{output_dir}/TD_{NN}_US{patent_no}/` — nested **inside** the input patent's output folder, alongside its main bundle PDFs — with its own `manifest.json`. Disapproved decisions are skipped.
+`bundles_api._process_disclaimers()` collects approved cited patents (de-duped), **reverses** the list (descending), resolves each via `resolve_patent_to_application()`, builds 3-bundle layout, and downloads the types in `config.DISCLAIMER_BUNDLES` (default `["middle", "granted_document"]`). All TD files land **directly in the input patent's output folder** (no subfolders), suffixed `_TD_{NN}`:
+
+- `"initial"`          → `Initial_claims_TD_{NN}.pdf`
+- `"middle"`           → `REM-CTNF-NOA_TD_{NN}.pdf`
+- `"granted"`          → `Granted_claims_TD_{NN}.pdf`
+- `"granted_document"` → `Granted_document_TD_{NN}.pdf`
+
+Same shared-manifest pattern as continuations. Disapproved decisions are skipped.
 
 OCR binaries must be on PATH — install via `brew install poppler tesseract`.
+
+## Granted-document helper (`_download_granted_for`)
+
+`bundles_api._download_granted_for(patent_no, filename, output_dir)` is the shared helper for fetching the full granted-patent PDF from Google Patents (via `pdf.get_patent_pdf_url`). Used by `_process_continuations`, `_process_disclaimers`, and the main flow's `_download_patent_pdf_smart` (closure form, currently inline). Returns `(success, reason)`.
 
 ## Manifest Skip Logic (`manifest.py`)
 

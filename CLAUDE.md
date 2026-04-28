@@ -25,32 +25,37 @@ Key flags: `--patent`, `--separate-bundles`, `--show-extra`, `--show-intclaim`, 
 
 ### `--continuations`
 
-With `--download`, calls `/continuity` for the input app and downloads bundles for every ancestor whose `claimParentageTypeCode` is in `us/config.py::CONTINUATION_FOLLOW_CODES` (default `{"CON", "CIP"}`). Parents are sorted by `parentApplicationFilingDate` ascending (oldest first). Each parent saves to `{output_dir or "."}/{NN}_US{parent_patent_no}/` where `NN` is the chronological order (zero-padded; falls back to bare app number when not granted).
+With `--download`, calls `/continuity` for the input app and downloads bundles for every ancestor whose `claimParentageTypeCode` is in `us/config.py::CONTINUATION_FOLLOW_CODES` (default `{"CON", "CIP"}`). Parents sorted by `parentApplicationFilingDate` **descending** (newest first). All parent files land **directly in the input patent's output folder** (no subfolders), suffixed `_parent_{NN}`.
 
-Bundle types per parent controlled by `us/config.py::CONTINUATION_BUNDLES` — list, edit to taste:
-- `"initial"` → `Initial_claims.pdf`
-- `"middle"`  → `REM-CTNF-NOA.pdf` (default)
-- `"granted"` → `Granted_claims.pdf`
+Bundle types per parent controlled by `us/config.py::CONTINUATION_BUNDLES` (default `["middle", "granted_document"]`):
+- `"initial"`          → `Initial_claims_parent_{NN}.pdf`
+- `"middle"`           → `REM-CTNF-NOA_parent_{NN}.pdf`
+- `"granted"`          → `Granted_claims_parent_{NN}.pdf`
+- `"granted_document"` → `Granted_document_parent_{NN}.pdf` (full Google Patents PDF)
 
 USPTO `/continuity` returns the **full ancestor chain** (not just direct parent), so one call covers the whole tree — no recursion needed.
 
 ### `--disclaimers`
 
-With `--download`, OCRs every Terminal Disclaimer review decision (`DISQ` doc code) on the input application. For each **approved** disclaimer, extracts the cited prior US patent numbers and downloads the bundle types in `us/config.py::DISCLAIMER_BUNDLES` (default `["middle"]` → `REM-CTNF-NOA.pdf`) for every cited patent.
+With `--download`, OCRs every Terminal Disclaimer review decision (`DISQ` doc code) on the input application. For each **approved** disclaimer, extracts the cited prior US patent numbers (descending order — reversed from collection order) and downloads the bundle types in `us/config.py::DISCLAIMER_BUNDLES` (default `["middle", "granted_document"]`) for every cited patent.
 
-Each cited patent saves to `{patent_output_dir}/TD_{NN}_US{patent_no}/` — i.e. **nested inside the input patent's own output folder**, alongside its main bundle PDFs. So a default run with no `--output-dir` produces:
+All TD files land **directly in the input patent's output folder** (no subfolders), suffixed `_TD_{NN}`. So a default run with no `--output-dir` produces:
 
 ```
 US{patent_no}/
   Initial_claims.pdf
   REM-CTNF-NOA.pdf
+  Granted_claims.pdf
   Granted_document.pdf
-  TD_01_US{cited1}/REM-CTNF-NOA.pdf
-  TD_02_US{cited2}/REM-CTNF-NOA.pdf
+  REM-CTNF-NOA_TD_01.pdf
+  Granted_document_TD_01.pdf
+  REM-CTNF-NOA_TD_02.pdf
+  Granted_document_TD_02.pdf
   ...
+  manifest.json   ← single shared manifest covers main + continuations + TDs
 ```
 
-Manifest skip logic identical to continuations.
+Manifest skip logic identical to continuations — one `manifest.json` in the parent folder tracks every artifact.
 
 DISQ forms are scanned PTOL forms (image-only PDFs), so this requires **OCR**:
 - `pdftoppm` (poppler) — converts PDF pages to PNG
