@@ -436,6 +436,24 @@ if __name__ == "__main__":
         return True
 
     # ------------------------------------------------------------------
+    def _download_index_for(target_app: str, filename: str, output_dir: str) -> tuple[bool, str]:
+        """Fetch most-recent FWCLM (Index of Claims) for target_app and save
+        to output_dir/filename. Returns (success, reason)."""
+        filepath = os.path.join(output_dir, filename)
+        print(f"  Fetching Index of Claims for {target_app} ...", file=sys.stderr)
+        try:
+            pdf = _merge_fwclm_pdf(target_app)
+            with open(filepath, "wb") as fh:
+                fh.write(pdf.getvalue())
+            size_kb = os.path.getsize(filepath) // 1024
+            print(f"  Saved {filename} ({size_kb:,} KB)", file=sys.stderr)
+            return True, ""
+        except ValueError as exc:
+            return False, f"merge failed: {exc}"
+        except Exception as exc:
+            return False, f"write error: {exc}"
+
+    # ------------------------------------------------------------------
     def _download_granted_for(patent_no: str, filename: str, output_dir: str) -> tuple[bool, str]:
         """Fetch the full granted patent PDF from Google Patents and save it
         to output_dir/filename. Returns (success, reason)."""
@@ -486,6 +504,7 @@ if __name__ == "__main__":
         _BUNDLE_TYPE = {"initial": "initial", "middle": "round", "granted": "granted"}
         wanted_types = {_BUNDLE_TYPE[k] for k in CONTINUATION_BUNDLES if k in _BUNDLE_TYPE}
         want_granted_doc = "granted_document" in CONTINUATION_BUNDLES
+        want_index = "index_of_claims" in CONTINUATION_BUNDLES
 
         print(f"\n  Continuation parents ({len(parents)}, newest first):", file=sys.stderr)
         for i, p in enumerate(parents, 1):
@@ -539,6 +558,26 @@ if __name__ == "__main__":
                 except Exception as exc:
                     print(f"  -> Failed: {exc}", file=sys.stderr)
                     failures.append({"key": key, "filename": filename, "reason": str(exc)})
+
+            if want_index:
+                key      = f"cont_{idx}_index_of_claims"
+                filename = f"Index_of_claims_parent_{idx}.pdf"
+                fwclm_docs = [d for d in _get_documents(parent_app) if d["code"] == "FWCLM"]
+                if not fwclm_docs:
+                    print(f"  [{filename}] no FWCLM docs — skipping", file=sys.stderr)
+                else:
+                    fp = _doc_fingerprint(fwclm_docs)
+                    needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
+                    if not needed:
+                        artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+                        print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                    else:
+                        print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+                        ok, fail_reason = _download_index_for(parent_app, filename, output_dir)
+                        if ok:
+                            artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
+                        else:
+                            failures.append({"key": key, "filename": filename, "reason": fail_reason})
 
             if want_granted_doc:
                 patent_no = p.get("patent_no")
@@ -604,6 +643,7 @@ if __name__ == "__main__":
         _BUNDLE_TYPE = {"initial": "initial", "middle": "round", "granted": "granted"}
         wanted_types = {_BUNDLE_TYPE[k] for k in DISCLAIMER_BUNDLES if k in _BUNDLE_TYPE}
         want_granted_doc = "granted_document" in DISCLAIMER_BUNDLES
+        want_index = "index_of_claims" in DISCLAIMER_BUNDLES
 
         width = max(2, len(str(len(cited))))
         print(f"\n  Terminal Disclaimer cited patents ({len(cited)} from "
@@ -660,6 +700,26 @@ if __name__ == "__main__":
                 except Exception as exc:
                     print(f"  -> Failed: {exc}", file=sys.stderr)
                     failures.append({"key": key, "filename": filename, "reason": str(exc)})
+
+            if want_index:
+                key      = f"td_{idx}_index_of_claims"
+                filename = f"Index_of_claims_TD_{idx}.pdf"
+                fwclm_docs = [d for d in _get_documents(td_app) if d["code"] == "FWCLM"]
+                if not fwclm_docs:
+                    print(f"  [{filename}] no FWCLM docs — skipping", file=sys.stderr)
+                else:
+                    fp = _doc_fingerprint(fwclm_docs)
+                    needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
+                    if not needed:
+                        artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+                        print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                    else:
+                        print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+                        ok, fail_reason = _download_index_for(td_app, filename, output_dir)
+                        if ok:
+                            artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
+                        else:
+                            failures.append({"key": key, "filename": filename, "reason": fail_reason})
 
             if want_granted_doc:
                 key      = f"td_{idx}_patent_pdf"

@@ -49,8 +49,9 @@ CONTINUATION_FOLLOW_CODES = {"CON", "CIP"}
 #   "initial"          →  Initial_claims_parent_{NN}.pdf
 #   "middle"           →  REM-CTNF-NOA_parent_{NN}.pdf
 #   "granted"          →  Granted_claims_parent_{NN}.pdf
+#   "index_of_claims"  →  Index_of_claims_parent_{NN}.pdf  (most recent FWCLM)
 #   "granted_document" →  Granted_document_parent_{NN}.pdf  (full Google Patents PDF)
-CONTINUATION_BUNDLES = ["middle", "granted_document"]
+CONTINUATION_BUNDLES = ["initial", "middle", "granted", "index_of_claims"]
 
 # ---------------------------------------------------------------------------
 # Terminal Disclaimer download settings  (--disclaimers)
@@ -62,8 +63,9 @@ CONTINUATION_BUNDLES = ["middle", "granted_document"]
 #   "initial"          →  Initial_claims_TD_{NN}.pdf
 #   "middle"           →  REM-CTNF-NOA_TD_{NN}.pdf
 #   "granted"          →  Granted_claims_TD_{NN}.pdf
+#   "index_of_claims"  →  Index_of_claims_TD_{NN}.pdf  (most recent FWCLM)
 #   "granted_document" →  Granted_document_TD_{NN}.pdf
-DISCLAIMER_BUNDLES = ["middle", "granted_document"]
+DISCLAIMER_BUNDLES = ["initial", "middle", "granted", "index_of_claims"]
 
 GOOGLE_PATENTS_HEADERS = {
     # A bare "Mozilla/5.0" UA is a known bot fingerprint and gets served a

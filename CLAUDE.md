@@ -27,30 +27,39 @@ Key flags: `--patent`, `--separate-bundles`, `--show-extra`, `--show-intclaim`, 
 
 With `--download`, calls `/continuity` for the input app and downloads bundles for every ancestor whose `claimParentageTypeCode` is in `us/config.py::CONTINUATION_FOLLOW_CODES` (default `{"CON", "CIP"}`). Parents sorted by `parentApplicationFilingDate` **descending** (newest first). All parent files land **directly in the input patent's output folder** (no subfolders), suffixed `_parent_{NN}`.
 
-Bundle types per parent controlled by `us/config.py::CONTINUATION_BUNDLES` (default `["middle", "granted_document"]`):
+Bundle types per parent controlled by `us/config.py::CONTINUATION_BUNDLES` (default `["initial", "middle", "granted", "index_of_claims"]`):
 - `"initial"`          → `Initial_claims_parent_{NN}.pdf`
 - `"middle"`           → `REM-CTNF-NOA_parent_{NN}.pdf`
 - `"granted"`          → `Granted_claims_parent_{NN}.pdf`
+- `"index_of_claims"`  → `Index_of_claims_parent_{NN}.pdf` (most recent FWCLM)
 - `"granted_document"` → `Granted_document_parent_{NN}.pdf` (full Google Patents PDF)
 
 USPTO `/continuity` returns the **full ancestor chain** (not just direct parent), so one call covers the whole tree — no recursion needed.
 
 ### `--disclaimers`
 
-With `--download`, OCRs every Terminal Disclaimer review decision (`DISQ` doc code) on the input application. For each **approved** disclaimer, extracts the cited prior US patent numbers (descending order — reversed from collection order) and downloads the bundle types in `us/config.py::DISCLAIMER_BUNDLES` (default `["middle", "granted_document"]`) for every cited patent.
+With `--download`, OCRs every Terminal Disclaimer review decision (`DISQ` doc code) on the input application. For each **approved** disclaimer, extracts the cited prior US patent numbers (descending order — reversed from collection order) and downloads the bundle types in `us/config.py::DISCLAIMER_BUNDLES` (default `["initial", "middle", "granted", "index_of_claims"]`) for every cited patent.
 
-All TD files land **directly in the input patent's output folder** (no subfolders), suffixed `_TD_{NN}`. So a default run with no `--output-dir` produces:
+Bundle keys (same as continuations):
+- `"initial"`          → `Initial_claims_TD_{NN}.pdf`
+- `"middle"`           → `REM-CTNF-NOA_TD_{NN}.pdf`
+- `"granted"`          → `Granted_claims_TD_{NN}.pdf`
+- `"index_of_claims"`  → `Index_of_claims_TD_{NN}.pdf` (most recent FWCLM)
+- `"granted_document"` → `Granted_document_TD_{NN}.pdf`
+
+All TD files land **directly in the input patent's output folder** (no subfolders), suffixed `_TD_{NN}`. Example layout:
 
 ```
 US{patent_no}/
   Initial_claims.pdf
   REM-CTNF-NOA.pdf
   Granted_claims.pdf
+  Index_of_claims.pdf
   Granted_document.pdf
+  Initial_claims_TD_01.pdf
   REM-CTNF-NOA_TD_01.pdf
-  Granted_document_TD_01.pdf
-  REM-CTNF-NOA_TD_02.pdf
-  Granted_document_TD_02.pdf
+  Granted_claims_TD_01.pdf
+  Index_of_claims_TD_01.pdf
   ...
   manifest.json   ← single shared manifest covers main + continuations + TDs
 ```
