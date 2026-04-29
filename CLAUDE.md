@@ -57,21 +57,28 @@ Re-running for a parent / TD-cited patent later reuses its own folder + manifest
 
 Written to the main patent's folder when `--continuations` and/or `--disclaimers` returns at least one entry. Records the ordered list of sibling folders. Order matches the legacy `_parent_NN` / `_TD_NN` numbering (continuations sorted by filing_date DESC; TDs in reversed collection order).
 
+`folder` values are **absolute paths**. `downloaded` lists **all PDFs currently in the folder** (not just newly fetched ones), so re-runs on already-populated folders show the full file set.
+
 ```json
 {
-  "app_no": "16123456",
-  "patent_no": "12167405",
-  "saved_at": "2026-04-29T...",
+  "source": {
+    "app_no": "16123456",
+    "patent_no": "US12167405",
+    "saved_at": "2026-04-29T...",
+    "folder": "/abs/path/to/us_patents/US12167405",
+    "status": "Patented Case",
+    "downloaded": ["US12167405_Granted_claims.pdf", "US12167405_Granted_document.pdf", "..."]
+  },
   "continuations": [
     {"index": 1, "relationship": "CON of 16123456",
-     "app_no": "15987654", "patent_no": "11876543",
+     "app_no": "15987654", "patent_no": "US11876543",
      "filing_date": "2020-03-15", "status": "GRANTED",
-     "folder_name": "US11876543", "folder": "../US11876543",
+     "folder_name": "US11876543", "folder": "/abs/path/to/us_patents/US11876543",
      "downloaded": [...], "failures": [...]}
   ],
   "disclaimers": [
-    {"index": 1, "patent_no": "10987654", "td_app_no": "14123456",
-     "folder_name": "US10987654", "folder": "../US10987654",
+    {"index": 1, "patent_no": "US10987654", "td_app_no": "14123456",
+     "folder_name": "US10987654", "folder": "/abs/path/to/us_patents/US10987654",
      "downloaded": [...], "failures": [...]}
   ]
 }

@@ -242,6 +242,9 @@ if __name__ == "__main__":
         patent_no: str | None,
         continuations: list,
         disclaimers: list,
+        source_folder: str = ".",
+        source_status: str | None = None,
+        source_downloaded: list | None = None,
     ) -> None:
         """
         Persist `related.json` in the main patent's folder.
@@ -251,11 +254,17 @@ if __name__ == "__main__":
         matches the legacy `_parent_NN` / `_TD_NN` numbering.
         """
         from datetime import datetime
+        saved_at = datetime.utcnow().isoformat()
         path = os.path.join(output_dir, "related.json")
         payload = {
-            "app_no":        app_no,
-            "patent_no":     patent_no,
-            "saved_at":      datetime.utcnow().isoformat(),
+            "source": {
+                "app_no":     app_no,
+                "patent_no":  f"US{patent_no}" if patent_no else None,
+                "saved_at":   saved_at,
+                "folder":     source_folder,
+                "status":     source_status,
+                "downloaded": source_downloaded or [],
+            },
             "continuations": continuations,
             "disclaimers":   disclaimers,
         }
@@ -310,15 +319,23 @@ if __name__ == "__main__":
             """Run continuation / disclaimer sweeps and persist related.json
             in the main patent's folder (only if there's anything to record)."""
             cont_list = (
-                _process_continuations(app_no, root, main_dir, args.legacy_parents)
+                _process_continuations(app_no, root, args.legacy_parents)
                 if args.continuations else []
             )
             disq_list = (
-                _process_disclaimers(app_no, root, main_dir, args.legacy_parents)
+                _process_disclaimers(app_no, root, args.legacy_parents)
                 if args.disclaimers else []
             )
             if cont_list or disq_list:
-                _save_related(main_dir, app_no, patent_no_meta, cont_list, disq_list)
+                all_in_main = sorted(
+                    f for f in os.listdir(main_dir) if f.endswith(".pdf")
+                ) if os.path.isdir(main_dir) else []
+                _save_related(
+                    main_dir, app_no, patent_no_meta, cont_list, disq_list,
+                    source_folder     = os.path.abspath(main_dir),
+                    source_status     = meta.get("status"),
+                    source_downloaded = all_in_main,
+                )
 
         # ---- separate-bundles inline helpers (filename prefix applied) ----
         def _download_patent_pdf() -> tuple[bool, str]:
@@ -813,7 +830,6 @@ if __name__ == "__main__":
     def _process_continuations(
         app_no: str,
         root: str,
-        main_output_dir: str,
         legacy_parents: bool = False,
     ) -> list:
         """
@@ -885,21 +901,20 @@ if __name__ == "__main__":
             if not summary["downloaded"] and not summary["skipped"] and not summary["failures"]:
                 continue
 
-            try:
-                folder_rel = os.path.relpath(parent_dir, main_output_dir)
-            except ValueError:
-                folder_rel = parent_dir
+            all_in_parent = sorted(
+                f for f in os.listdir(parent_dir) if f.endswith(".pdf")
+            ) if os.path.isdir(parent_dir) else []
 
             results.append({
                 "index":        i,
                 "relationship": p.get("relationship"),
                 "app_no":       parent_app,
-                "patent_no":    parent_patent_no,
+                "patent_no":    f"US{parent_patent_no}" if parent_patent_no else None,
                 "filing_date":  p.get("filing_date"),
                 "status":       p.get("status"),
                 "folder_name":  folder_name,
-                "folder":       folder_rel,
-                "downloaded":   summary["downloaded"],
+                "folder":       os.path.abspath(parent_dir),
+                "downloaded":   all_in_parent,
                 "failures":     summary["failures"],
             })
 
@@ -909,7 +924,6 @@ if __name__ == "__main__":
     def _process_disclaimers(
         app_no: str,
         root: str,
-        main_output_dir: str,
         legacy_parents: bool = False,
     ) -> list:
         """
@@ -997,18 +1011,17 @@ if __name__ == "__main__":
             if not summary["downloaded"] and not summary["skipped"] and not summary["failures"]:
                 continue
 
-            try:
-                folder_rel = os.path.relpath(td_dir, main_output_dir)
-            except ValueError:
-                folder_rel = td_dir
+            all_in_td = sorted(
+                f for f in os.listdir(td_dir) if f.endswith(".pdf")
+            ) if os.path.isdir(td_dir) else []
 
             results.append({
                 "index":       i,
-                "patent_no":   patent_no,
+                "patent_no":   f"US{patent_no}",
                 "td_app_no":   td_app,
                 "folder_name": folder_name,
-                "folder":      folder_rel,
-                "downloaded":  summary["downloaded"],
+                "folder":      os.path.abspath(td_dir),
+                "downloaded":  all_in_td,
                 "failures":    summary["failures"],
             })
 
