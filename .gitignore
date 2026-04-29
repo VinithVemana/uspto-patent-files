@@ -3,6 +3,10 @@
 
 # Downloaded patent PDF artifacts
 [0-9]*/
+US[0-9]*/
+pdfs/
+us_bulk_downloads/
+us_bulk_downloads.zip
 
 # Python cache
 __pycache__/
@@ -11,6 +15,15 @@ __pycache__/
 
 # EP downloaded patent PDF artifacts (EP{digits} directories)
 EP[0-9]*/
+
+# BJF run artifacts (logs + xlsx results)
+bjf/bjf_fetch.log
+bjf/bjf_results.xlsx
+
+# One-off scratch / input files
+extract_patent_numbers.py
+extracted_patents.txt
+trial cases.docx
 
 # Playwright MCP cache (artifact from research session)
 .playwright-mcp/

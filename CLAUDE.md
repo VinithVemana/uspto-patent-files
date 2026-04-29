@@ -93,10 +93,27 @@ EPO_CLIENT_SECRET=...
 ## Dependencies
 
 ```
-fastapi, uvicorn, requests, PyPDF2, beautifulsoup4, tqdm, python-dotenv
+fastapi, uvicorn, requests, PyPDF2, beautifulsoup4, tqdm, python-dotenv,
+lxml, reportlab
 ```
 
 No `requirements.txt` — install manually.
+
+## Granted-Claims Source: srch11 → USPTO fallback
+
+Every `Granted_claims*.pdf` produced by `bundles_api.py` — main bundle, every `_TD_NN` (`--disclaimers`), and every `_parent_NN` (`--continuations`) — prefers Dolcera Solr (`srch11.dolcera.net:12080/solr/alexandria-101123`) over the USPTO bundle merge.
+
+Solr query: `pn:"<patent_no>" AND publication_type:"Granted"` with `fl=clm,ucid&rows=1`. Always take `clm[0]` from the response — the `clm` field is a list and the first element is the granted-publication claim XML; later elements are other publication variants and are ignored.
+
+Why prefer Solr: it mirrors the issued grant verbatim. The latest USPTO `CLM` document on the file wrapper can include examiner amendments not present in the published patent. For old patents (pre-AIA, pre-2010s), the granted bundle on USPTO is often empty, so Solr is the **only** source — without it, the granted-claims PDF would not exist at all.
+
+Fallback triggers: srch11 TCP unreachable (2s probe, cached per process), Solr `numFound=0`, malformed XML, parse yields 0 claims, or PDF render error. On fallback, `_merge_bundle_pdfs` runs against the USPTO bundle if it has documents; otherwise the artifact is recorded as a clean `failures` entry in the manifest.
+
+Manifest tagging: when the file came from Solr, the artifact fingerprint is `srch11:{patent_number}` (vs. the 16-hex USPTO doc-fingerprint). Source swaps trigger a re-fetch on the next run automatically.
+
+Logging: every run prints the TCP-probe result, the Solr `numFound`, the `clm` list size, the parsed claim count, and the resolved source decision (`srch11` vs `uspto`) to stderr — so debugging "why is this PDF missing / why is this from USPTO" is a single grep away.
+
+Implementation: `us/srch11.py` (`is_reachable`, `fetch_claims_xml`, `parse_claims`, `render_claims_pdf`, `build_granted_claims_pdf`). Top-level helpers `_granted_claims_planned_fingerprint` and `_build_granted_claims_pdf` in `bundles_api.py` are reused by `_download_three_smart`, `_process_disclaimers`, and `_process_continuations`.
 
 ## Architecture
 

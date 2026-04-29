@@ -50,6 +50,17 @@ RUN FROM THE COMMAND LINE
       python bundles_api.py 18221238 --download  --continuations
       python bundles_api.py 12141042 --download  --disclaimers
 
+GRANTED CLAIMS SOURCE
+---------------------
+Every Granted_claims*.pdf — main bundle, _TD_NN (--disclaimers), and
+_parent_NN (--continuations) — is built from Dolcera Solr
+(`srch11.dolcera.net:12080`, collection `alexandria-101123`) when reachable.
+Solr mirrors the issued grant verbatim, avoiding examiner amendments that
+may appear in the latest USPTO CLM document, and works for legacy patents
+whose USPTO granted bundle is empty. Falls back to the USPTO bundle merge
+automatically when srch11 is unreachable, has no match, or returns
+malformed claims. See us/srch11.py.
+
 WEB SERVER
 ----------
     uvicorn bundles_server:app --host 0.0.0.0 --port 7901
@@ -74,6 +85,7 @@ from us.bundles import (
     _filter_docs,
 )
 from us.pdf import get_patent_pdf_url, _merge_bundle_pdfs, _merge_fwclm_pdf
+from us import srch11
 from us.manifest import (
     MANIFEST_FILE,
     _doc_fingerprint,
@@ -90,6 +102,75 @@ if __name__ == "__main__":
     import sys
 
     import requests
+
+    # ------------------------------------------------------------------
+    # Granted-claims source-picking helpers — shared across the main flow,
+    # `_process_continuations`, and `_process_disclaimers`.
+    # ------------------------------------------------------------------
+    def _granted_claims_planned_fingerprint(b: dict, patent_no: str | None) -> str:
+        """
+        Predict which source `_build_granted_claims_pdf` will use, so the
+        caller's up-to-date check uses the matching fingerprint format and
+        re-runs detect source swaps.
+        """
+        if patent_no and srch11.is_reachable():
+            return f"srch11:{patent_no}"
+        return _doc_fingerprint(b["documents"]) if b["documents"] else ""
+
+    def _build_granted_claims_pdf(
+        b: dict, patent_no: str | None, grant_date: str | None,
+        filepath: str, log_label: str = "Granted_claims",
+    ) -> tuple[bool, str, str, str]:
+        """
+        Source policy for any Granted_claims PDF (main / TD / continuation):
+          1. srch11 (Dolcera Solr) when reachable and patent_no is known
+          2. USPTO `_merge_bundle_pdfs` when bundle has documents
+          3. failure if neither is available
+
+        Returns ``(ok, source, fingerprint, reason)``. ``source`` is one of
+        ``"srch11"`` / ``"uspto"``; ``fingerprint`` matches the source so
+        re-runs detect swaps; ``reason`` explains failures (or "ok").
+        """
+        print(f"  [{log_label}] resolving source: "
+              f"patent_no={patent_no!r}, docs_count={len(b['documents'])}",
+              file=sys.stderr)
+
+        if patent_no and srch11.is_reachable():
+            buf, srch_reason = srch11.build_granted_claims_pdf(
+                patent_no, grant_date
+            )
+            if buf is not None:
+                try:
+                    with open(filepath, "wb") as fh:
+                        fh.write(buf.getvalue())
+                    size_kb = os.path.getsize(filepath) // 1024
+                    print(f"  [{log_label}] -> Saved from srch11 ({size_kb:,} KB)",
+                          file=sys.stderr)
+                    return True, "srch11", f"srch11:{patent_no}", "ok"
+                except OSError as exc:
+                    print(f"  [{log_label}] srch11 write failed: {exc} "
+                          f"— falling back to USPTO", file=sys.stderr)
+            else:
+                print(f"  [{log_label}] srch11 path unavailable "
+                      f"({srch_reason}) — falling back to USPTO",
+                      file=sys.stderr)
+
+        if b["documents"]:
+            try:
+                pdf = _merge_bundle_pdfs(
+                    {"type": b["type"], "documents": b["documents"]},
+                    show_extra=False, show_intclaim=False,
+                )
+                with open(filepath, "wb") as fh:
+                    fh.write(pdf.getvalue())
+                size_kb = os.path.getsize(filepath) // 1024
+                print(f"  [{log_label}] -> Saved from USPTO merge "
+                      f"({size_kb:,} KB)", file=sys.stderr)
+                return True, "uspto", _doc_fingerprint(b["documents"]), "ok"
+            except (ValueError, OSError) as exc:
+                return False, "", "", f"USPTO merge failed: {exc}"
+
+        return False, "", "", "no source available (srch11 unavailable, USPTO bundle empty)"
 
     # ------------------------------------------------------------------
     def _process_one_patent(input_str, args, parent_output_dir=None):
@@ -360,8 +441,40 @@ if __name__ == "__main__":
                 print(f"    -> Failed: {exc}")
 
         def _download_three_smart(b: dict) -> None:
-            key            = f"bundle_{b['type']}"
-            filename       = f"{b['filename']}.pdf"
+            key      = f"bundle_{b['type']}"
+            filename = f"{b['filename']}.pdf"
+            patent_no_local = meta.get("patent_number")
+            is_granted_bundle = (
+                b["type"] == "granted" and b["filename"] == "Granted_claims"
+            )
+
+            # Granted_claims has its own source-picking helper that prefers
+            # Dolcera Solr (srch11) and falls back to USPTO _merge_bundle_pdfs.
+            # All other bundles use the simple USPTO-only path.
+            if is_granted_bundle:
+                fp = _granted_claims_planned_fingerprint(b, patent_no_local)
+                needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
+                if not needed:
+                    _artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                    return
+                print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+
+                filepath = os.path.join(output_dir, filename)
+                ok, _src, real_fp, build_reason = _build_granted_claims_pdf(
+                    b, patent_no_local, meta.get("grant_date"), filepath,
+                    log_label="Granted_claims",
+                )
+                if ok:
+                    _artifact_state[key] = {
+                        "filename": filename, "fingerprint": real_fp, "needed": True
+                    }
+                else:
+                    print(f"    -> Failed: {build_reason}", file=sys.stderr)
+                    _failures.append({"key": key, "filename": filename, "reason": build_reason})
+                return
+
+            # Non-granted bundles: existing USPTO-only path.
             fp             = _doc_fingerprint(b["documents"]) if b["documents"] else ""
             needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
             _artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": needed}
@@ -384,7 +497,12 @@ if __name__ == "__main__":
             if args.download:
                 os.makedirs(output_dir, exist_ok=True)
                 for b in three:
-                    if b["documents"]:
+                    is_granted_with_patent = (
+                        b["type"] == "granted"
+                        and b["filename"] == "Granted_claims"
+                        and meta.get("patent_number")
+                    )
+                    if b["documents"] or is_granted_with_patent:
                         _download_three_smart(b)
                 _download_patent_pdf_smart()
                 _download_index_smart()
@@ -421,8 +539,14 @@ if __name__ == "__main__":
                     pages = f"{doc['pages']}p" if doc["pages"] else "?p"
                     print(f"    {doc['date'][:10]}  {doc['code']:<12}  "
                           f"{doc['desc'][:48]:<48}  {pages:>4}")
-            if args.download and b["documents"]:
-                _download_three_smart(b)
+            if args.download:
+                is_granted_with_patent = (
+                    b["type"] == "granted"
+                    and b["filename"] == "Granted_claims"
+                    and meta.get("patent_number")
+                )
+                if b["documents"] or is_granted_with_patent:
+                    _download_three_smart(b)
             print()
 
         if args.download:
@@ -532,11 +656,47 @@ if __name__ == "__main__":
                 continue
 
             three = _build_three_bundles(parent_bundles)
+            parent_patent_no = p.get("patent_no") or None
+            parent_grant_date: str | None = None
             for b in three:
-                if b["type"] not in wanted_types or not b["documents"]:
+                if b["type"] not in wanted_types:
                     continue
+                is_granted_bundle = (
+                    b["type"] == "granted" and b["filename"] == "Granted_claims"
+                )
+                if not b["documents"] and not is_granted_bundle:
+                    continue
+                if not b["documents"] and not parent_patent_no:
+                    continue
+
                 key      = f"cont_{idx}_bundle_{b['type']}"
                 filename = f"{b['filename']}_parent_{idx}.pdf"
+                filepath = os.path.join(output_dir, filename)
+
+                if is_granted_bundle:
+                    fp = _granted_claims_planned_fingerprint(b, parent_patent_no)
+                    needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
+                    if not needed:
+                        artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+                        print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                        continue
+                    print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+                    if parent_grant_date is None and parent_patent_no:
+                        parent_meta = _get_metadata(parent_app) or {}
+                        parent_grant_date = parent_meta.get("grant_date") or ""
+                    ok, _src, real_fp, build_reason = _build_granted_claims_pdf(
+                        b, parent_patent_no, parent_grant_date or None, filepath,
+                        log_label=filename.removesuffix(".pdf"),
+                    )
+                    if ok:
+                        artifact_state[key] = {
+                            "filename": filename, "fingerprint": real_fp, "needed": True
+                        }
+                    else:
+                        print(f"  -> Failed: {build_reason}", file=sys.stderr)
+                        failures.append({"key": key, "filename": filename, "reason": build_reason})
+                    continue
+
                 fp       = _doc_fingerprint(b["documents"])
                 needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
                 if not needed:
@@ -544,7 +704,6 @@ if __name__ == "__main__":
                     print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
                     continue
                 print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-                filepath = os.path.join(output_dir, filename)
                 try:
                     pdf = _merge_bundle_pdfs(
                         {"type": b["type"], "documents": b["documents"]},
@@ -674,11 +833,49 @@ if __name__ == "__main__":
                 continue
 
             three = _build_three_bundles(td_bundles)
+            td_grant_date: str | None = None
             for b in three:
-                if b["type"] not in wanted_types or not b["documents"]:
+                if b["type"] not in wanted_types:
                     continue
+                is_granted_bundle = (
+                    b["type"] == "granted" and b["filename"] == "Granted_claims"
+                )
+                # Skip non-granted bundles when their docs are empty (existing
+                # behavior). Granted bundle goes through the source-picking
+                # helper, which can build from srch11 even with empty USPTO docs.
+                if not b["documents"] and not is_granted_bundle:
+                    continue
+                if not b["documents"] and not patent_no:
+                    continue
+
                 key      = f"td_{idx}_bundle_{b['type']}"
                 filename = f"{b['filename']}_TD_{idx}.pdf"
+                filepath = os.path.join(output_dir, filename)
+
+                if is_granted_bundle:
+                    fp = _granted_claims_planned_fingerprint(b, patent_no)
+                    needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
+                    if not needed:
+                        artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+                        print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                        continue
+                    print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+                    if td_grant_date is None:
+                        td_meta = _get_metadata(td_app) or {}
+                        td_grant_date = td_meta.get("grant_date") or ""
+                    ok, _src, real_fp, build_reason = _build_granted_claims_pdf(
+                        b, patent_no, td_grant_date or None, filepath,
+                        log_label=filename.removesuffix(".pdf"),
+                    )
+                    if ok:
+                        artifact_state[key] = {
+                            "filename": filename, "fingerprint": real_fp, "needed": True
+                        }
+                    else:
+                        print(f"  -> Failed: {build_reason}", file=sys.stderr)
+                        failures.append({"key": key, "filename": filename, "reason": build_reason})
+                    continue
+
                 fp       = _doc_fingerprint(b["documents"])
                 needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
                 if not needed:
@@ -686,7 +883,6 @@ if __name__ == "__main__":
                     print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
                     continue
                 print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-                filepath = os.path.join(output_dir, filename)
                 try:
                     pdf = _merge_bundle_pdfs(
                         {"type": b["type"], "documents": b["documents"]},
