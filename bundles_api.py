@@ -15,10 +15,37 @@ All CLI arguments accept any of these formats:
   Bare patent digits     11973593          tries app number first, falls back to patent lookup
                          11973593 --patent  force patent-to-app lookup with --patent flag
 
+OUTPUT LAYOUT
+-------------
+All patent folders live as siblings under a single root directory:
+
+  <root>/                              ← --output-dir, default `./us_patents/`
+    US12167405/                        ← granted patent → folder name `US{patent_no}`
+      US12167405_Initial_claims.pdf    ← every file prefixed `US{patent_no}_`
+      US12167405_REM-CTNF-NOA.pdf
+      US12167405_Granted_claims.pdf
+      US12167405_Index_of_claims.pdf
+      US12167405_Granted_document.pdf
+      manifest.json                    ← per-folder dedup manifest
+      related.json                     ← only on main; lists continuations + TDs
+    US{parent_patent_no}/              ← continuation parents are siblings
+      US{parent_patent_no}_Initial_claims.pdf
+      ...
+      manifest.json
+    app_15987654/                      ← un-granted parent → folder `app_{app_no}`
+      app_15987654_Initial_claims.pdf  ← files prefixed `app_{app_no}_`
+      ...
+    US{td_patent_no}/                  ← TD-cited patents are siblings
+      ...
+
+Re-running for a parent / TD-cited patent later reuses its own folder + manifest →
+no duplicate downloads.
+
 BULK MODE
 ---------
 Pass multiple patents as space-, comma-, or pipe-separated values.
-Each patent gets its own subfolder inside --output-dir.
+Each input patent gets its own folder under <root>; their continuations / TDs
+are siblings inside the same root.
 
     python bundles_api.py US10897328B2 US10912060B2 US10952166B2 --download --output-dir ./bulk
     python bundles_api.py "US10897328B2,US10912060B2,US10952166B2" --download --output-dir ./bulk
@@ -34,17 +61,21 @@ RUN FROM THE COMMAND LINE
       --show-extra        Also include OA support docs, amendments, advisory actions, RCE docs
       --show-intclaim     Also include intermediate CLM docs in round bundles
       --download          Download each bundle as a merged PDF to disk
-      --output-dir DIR    Where to save PDFs (default: ./{app_no}/)
+      --output-dir DIR    Root directory for all patent folders (default: ./us_patents/).
+                          Every patent — main, continuations, TDs — gets a sibling
+                          subfolder here.
       --separate-bundles  One PDF per prosecution round (default: 3-bundle collapse)
       --continuations     Also download bundles for every CON/CIP ancestor.
-                          Files land in the input patent's folder suffixed
-                          _parent_NN (newest filing date first). Types per
-                          us/config.py CONTINUATION_BUNDLES.
+                          Each parent gets its own sibling folder under <root>
+                          named US{parent_patent_no}/ (or app_{app_no}/ if not
+                          granted). Order recorded in main folder's related.json.
+                          Types per us/config.py CONTINUATION_BUNDLES.
       --disclaimers       OCR every DISQ decision; for each approved Terminal
                           Disclaimer download bundles for every cited prior
-                          patent. Files land in the input patent's folder
-                          suffixed _TD_NN (descending order). Types per
-                          DISCLAIMER_BUNDLES. Requires pdftoppm + tesseract on PATH.
+                          patent. Each cited patent gets its own sibling folder
+                          under <root>. Order recorded in main folder's
+                          related.json (descending). Types per DISCLAIMER_BUNDLES.
+                          Requires pdftoppm + tesseract on PATH.
       --legacy-parents    For --continuations / --disclaimers parents that have
                           no USPTO file-wrapper docs (typically pre-2001 apps),
                           still attempt Granted_claims via srch11 and
@@ -53,15 +84,15 @@ RUN FROM THE COMMAND LINE
                           index_of_claims are skipped (no USPTO docs to merge).
       --base-url URL      Base URL for download_url links (default: http://localhost:7901)
 
-      python bundles_api.py US8332478B2 --download  --continuations
+      python bundles_api.py US12167405 --download  --continuations
       python bundles_api.py 12141042 --download  --disclaimers
       python bundles_api.py US8332478B2 --download  --continuations --legacy-parents  # CIP/CON parents pre-2001
       python bundles_api.py US8332478B2 --download  --disclaimers --legacy-parents    # TD-cited patents pre-2001
 
 GRANTED CLAIMS SOURCE
 ---------------------
-Every Granted_claims*.pdf — main bundle, _TD_NN (--disclaimers), and
-_parent_NN (--continuations) — is built from Dolcera Solr
+Every Granted_claims*.pdf — main bundle plus every continuation / TD sibling —
+is built from Dolcera Solr
 (`srch11.dolcera.net:12080`, collection `alexandria-101123`) when reachable.
 Solr mirrors the issued grant verbatim, avoiding examiner amendments that
 may appear in the latest USPTO CLM document, and works for legacy patents
@@ -181,6 +212,59 @@ if __name__ == "__main__":
         return False, "", "", "no source available (srch11 unavailable, USPTO bundle empty)"
 
     # ------------------------------------------------------------------
+    # Folder + filename naming helpers
+    # ------------------------------------------------------------------
+    def _id_for(patent_no: str | None, app_no: str) -> tuple[str, str]:
+        """
+        Return ``(folder_name, file_prefix)`` for an application.
+
+        Granted patents → ``("US{patent_no}", "US{patent_no}_")``
+        Otherwise       → ``("app_{app_no}",  "app_{app_no}_")``
+
+        Use this everywhere a patent's per-folder identity is needed so the
+        scheme stays consistent across main / continuation / TD downloads.
+        """
+        if patent_no:
+            return f"US{patent_no}", f"US{patent_no}_"
+        return f"app_{app_no}", f"app_{app_no}_"
+
+    def _resolve_root(args) -> str:
+        """
+        Resolve the output root that holds every per-patent sibling folder.
+
+        --output-dir DIR if set; else default ``./us_patents/``.
+        """
+        return args.output_dir if args.output_dir is not None else "us_patents"
+
+    def _save_related(
+        output_dir: str,
+        app_no: str,
+        patent_no: str | None,
+        continuations: list,
+        disclaimers: list,
+    ) -> None:
+        """
+        Persist `related.json` in the main patent's folder.
+
+        Records the ordered list of continuation parents and TD-cited patents
+        (with their sibling folder paths) discovered during the run. Order
+        matches the legacy `_parent_NN` / `_TD_NN` numbering.
+        """
+        from datetime import datetime
+        path = os.path.join(output_dir, "related.json")
+        payload = {
+            "app_no":        app_no,
+            "patent_no":     patent_no,
+            "saved_at":      datetime.utcnow().isoformat(),
+            "continuations": continuations,
+            "disclaimers":   disclaimers,
+        }
+        with open(path, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        print(f"  Saved related.json ({len(continuations)} continuations, "
+              f"{len(disclaimers)} disclaimers)", file=sys.stderr)
+
+    # ------------------------------------------------------------------
     def _process_one_patent(input_str, args, parent_output_dir=None):
         """
         Resolve + fetch + (optionally) download one patent.
@@ -208,26 +292,42 @@ if __name__ == "__main__":
             return False
 
         patent_no_meta = meta.get("patent_number")
-        default_subdir = f"US{patent_no_meta}" if patent_no_meta else app_no
+        folder_name, prefix = _id_for(patent_no_meta, app_no)
 
-        if parent_output_dir is not None:
-            output_dir = os.path.join(parent_output_dir, default_subdir)
-        elif args.output_dir is not None:
-            output_dir = args.output_dir
-        else:
-            output_dir = default_subdir
+        # Output root holds every per-patent sibling folder. parent_output_dir
+        # is set by bulk mode; otherwise --output-dir DIR or default us_patents/.
+        root = parent_output_dir if parent_output_dir is not None else _resolve_root(args)
+        output_dir = os.path.join(root, folder_name)
 
-        manifest        = _load_manifest(output_dir) if args.download else {}
+        # Manifest is loaded inline only by --separate-bundles, which keeps the
+        # legacy per-round artifact bookkeeping. The 3-bundle main flow
+        # delegates entirely to _download_app_artifacts (own manifest inside).
+        manifest        = _load_manifest(output_dir) if (args.download and args.separate_bundles) else {}
         _artifact_state: dict = {}
         _failures:       list = []
 
+        def _run_related(main_dir: str) -> None:
+            """Run continuation / disclaimer sweeps and persist related.json
+            in the main patent's folder (only if there's anything to record)."""
+            cont_list = (
+                _process_continuations(app_no, root, main_dir, args.legacy_parents)
+                if args.continuations else []
+            )
+            disq_list = (
+                _process_disclaimers(app_no, root, main_dir, args.legacy_parents)
+                if args.disclaimers else []
+            )
+            if cont_list or disq_list:
+                _save_related(main_dir, app_no, patent_no_meta, cont_list, disq_list)
+
+        # ---- separate-bundles inline helpers (filename prefix applied) ----
         def _download_patent_pdf() -> tuple[bool, str]:
             patent_no = meta.get("patent_number")
             if not patent_no:
                 print("  (no patent number — application not yet granted, skipping patent.pdf)",
                       file=sys.stderr)
                 return False, "no patent number"
-            filename = "Granted_document.pdf"
+            filename = f"{prefix}Granted_document.pdf"
             filepath = os.path.join(output_dir, filename)
             print(f"  Fetching full patent PDF for US{patent_no} ...", file=sys.stderr)
             pdf_url = get_patent_pdf_url(patent_no)
@@ -248,14 +348,15 @@ if __name__ == "__main__":
                 return False, f"download error: {exc}"
 
         def _download_index_of_claims() -> tuple[bool, str]:
-            filepath = os.path.join(output_dir, "Index_of_claims.pdf")
+            filename = f"{prefix}Index_of_claims.pdf"
+            filepath = os.path.join(output_dir, filename)
             print("  Fetching Index of Claims (FWCLM) ...", file=sys.stderr)
             try:
                 pdf = _merge_fwclm_pdf(app_no)
                 with open(filepath, "wb") as fh:
                     fh.write(pdf.getvalue())
                 size_kb = os.path.getsize(filepath) // 1024
-                print(f"  Saved Index_of_claims.pdf ({size_kb:,} KB)", file=sys.stderr)
+                print(f"  Saved {filename} ({size_kb:,} KB)", file=sys.stderr)
                 return True, ""
             except ValueError as exc:
                 print(f"  Index of Claims not available: {exc}", file=sys.stderr)
@@ -275,7 +376,7 @@ if __name__ == "__main__":
 
         def _download_sep_bundle_smart(bundle: dict, safe: str) -> None:
             key      = f"sep_bundle_{bundle['index']}"
-            filename = f"{safe}.pdf"
+            filename = f"{prefix}{safe}.pdf"
             docs     = _filter_docs(bundle["documents"], bundle["type"],
                                     args.show_extra, args.show_intclaim)
             fp       = _doc_fingerprint(docs) if docs else ""
@@ -305,13 +406,13 @@ if __name__ == "__main__":
             if not patent_no:
                 print("  (no patent number — not yet granted, skipping patent.pdf)", file=sys.stderr)
                 return
-            filename       = "Granted_document.pdf"
+            filename       = f"{prefix}Granted_document.pdf"
             needed, reason = _needs_download("patent_pdf", filename, patent_no, manifest, output_dir)
             if not needed:
                 _record_skip("patent_pdf", filename, patent_no)
-                print(f"  [US{patent_no}.pdf] up-to-date — skipped", file=sys.stderr)
+                print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
                 return
-            print(f"  [US{patent_no}.pdf] {reason} — downloading", file=sys.stderr)
+            print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
             ok, fail_reason = _download_patent_pdf()
             if ok:
                 _record_success("patent_pdf", filename, patent_no)
@@ -322,19 +423,20 @@ if __name__ == "__main__":
             fwclm_docs = [d for d in _get_documents(app_no) if d["code"] == "FWCLM"]
             if not fwclm_docs:
                 return
+            filename       = f"{prefix}Index_of_claims.pdf"
             fp             = _doc_fingerprint(fwclm_docs)
-            needed, reason = _needs_download("index_of_claims", "Index_of_claims.pdf",
+            needed, reason = _needs_download("index_of_claims", filename,
                                              fp, manifest, output_dir)
             if not needed:
-                _record_skip("index_of_claims", "Index_of_claims.pdf", fp)
-                print("  [Index_of_claims.pdf] up-to-date — skipped", file=sys.stderr)
+                _record_skip("index_of_claims", filename, fp)
+                print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
                 return
-            print(f"  [Index_of_claims.pdf] {reason} — downloading", file=sys.stderr)
+            print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
             ok, fail_reason = _download_index_of_claims()
             if ok:
-                _record_success("index_of_claims", "Index_of_claims.pdf", fp)
+                _record_success("index_of_claims", filename, fp)
             else:
-                _record_failure("index_of_claims", "Index_of_claims.pdf", fail_reason)
+                _record_failure("index_of_claims", filename, fail_reason)
 
         def _finalize_manifest() -> None:
             if not _artifact_state and not _failures:
@@ -381,11 +483,8 @@ if __name__ == "__main__":
                         _download_sep_bundle_smart(bundle, safe)
                     _download_patent_pdf_smart()
                     _download_index_smart()
-                    if args.continuations:
-                        _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
-                    if args.disclaimers:
-                        _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
                     _finalize_manifest()
+                    _run_related(output_dir)
                 return True
 
             # Text output
@@ -425,100 +524,40 @@ if __name__ == "__main__":
             if args.download:
                 _download_patent_pdf_smart()
                 _download_index_smart()
-                if args.continuations:
-                    _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
-                if args.disclaimers:
-                    _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
                 _finalize_manifest()
+                _run_related(output_dir)
             return True
 
         # ============================================================== DEFAULT: 3-bundle mode
         three = _build_three_bundles(bundles)
 
-        def _download_three(b: dict) -> None:
-            filepath = os.path.join(output_dir, f"{b['filename']}.pdf")
-            print(f"    -> Downloading to {filepath} ...")
-            try:
-                pdf = _merge_bundle_pdfs({"type": b["type"], "documents": b["documents"]},
-                                         show_extra=False, show_intclaim=False)
-                with open(filepath, "wb") as fh:
-                    fh.write(pdf.getvalue())
-                size_kb = os.path.getsize(filepath) // 1024
-                print(f"    -> Saved ({size_kb:,} KB)")
-            except ValueError as exc:
-                print(f"    -> Failed: {exc}")
-
-        def _download_three_smart(b: dict) -> None:
-            key      = f"bundle_{b['type']}"
-            filename = f"{b['filename']}.pdf"
-            patent_no_local = meta.get("patent_number")
-            is_granted_bundle = (
-                b["type"] == "granted" and b["filename"] == "Granted_claims"
+        def _run_main_3bundle() -> None:
+            """Download main 3-bundle artifacts via the shared helper."""
+            _download_app_artifacts(
+                app_no          = app_no,
+                output_dir      = output_dir,
+                patent_no       = patent_no_meta,
+                grant_date      = meta.get("grant_date"),
+                bundle_keys     = ["initial", "middle", "granted",
+                                   "index_of_claims", "granted_document"],
+                file_prefix     = prefix,
+                legacy_fallback = False,
+                bundles         = bundles,
             )
-
-            # Granted_claims has its own source-picking helper that prefers
-            # Dolcera Solr (srch11) and falls back to USPTO _merge_bundle_pdfs.
-            # All other bundles use the simple USPTO-only path.
-            if is_granted_bundle:
-                fp = _granted_claims_planned_fingerprint(b, patent_no_local)
-                needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
-                if not needed:
-                    _artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
-                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
-                    return
-                print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-
-                filepath = os.path.join(output_dir, filename)
-                ok, _src, real_fp, build_reason = _build_granted_claims_pdf(
-                    b, patent_no_local, meta.get("grant_date"), filepath,
-                    log_label="Granted_claims",
-                )
-                if ok:
-                    _artifact_state[key] = {
-                        "filename": filename, "fingerprint": real_fp, "needed": True
-                    }
-                else:
-                    print(f"    -> Failed: {build_reason}", file=sys.stderr)
-                    _failures.append({"key": key, "filename": filename, "reason": build_reason})
-                return
-
-            # Non-granted bundles: existing USPTO-only path.
-            fp             = _doc_fingerprint(b["documents"]) if b["documents"] else ""
-            needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
-            _artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": needed}
-            if not needed:
-                print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
-                return
-            print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-            _download_three(b)
 
         if not args.text:
             output = {
                 **meta,
                 "bundles": [
-                    {"filename": b["filename"], "label": b["label"],
+                    {"filename": f"{prefix}{b['filename']}", "label": b["label"],
                      "type": b["type"], "documents": b["documents"]}
                     for b in three
                 ],
             }
             print(json.dumps(output, indent=2))
             if args.download:
-                os.makedirs(output_dir, exist_ok=True)
-                for b in three:
-                    is_granted_with_patent = (
-                        b["type"] == "granted"
-                        and b["filename"] == "Granted_claims"
-                        and meta.get("patent_number")
-                    )
-                    if b["documents"] or is_granted_with_patent:
-                        _download_three_smart(b)
-                _download_patent_pdf_smart()
-                _download_index_smart()
-                if args.continuations:
-                    _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
-                if args.disclaimers:
-                    _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
-                _finalize_manifest()
+                _run_main_3bundle()
+                _run_related(output_dir)
             return True
 
         # Text output
@@ -535,11 +574,8 @@ if __name__ == "__main__":
         print("=" * 64)
         print(f"\n3-bundle mode  (use --separate-bundles for one PDF per round)\n")
 
-        if args.download:
-            os.makedirs(output_dir, exist_ok=True)
-
         for b in three:
-            print(f"[{b['filename']}]")
+            print(f"[{prefix}{b['filename']}]")
             if not b["documents"]:
                 print("    (no documents)")
             else:
@@ -547,24 +583,11 @@ if __name__ == "__main__":
                     pages = f"{doc['pages']}p" if doc["pages"] else "?p"
                     print(f"    {doc['date'][:10]}  {doc['code']:<12}  "
                           f"{doc['desc'][:48]:<48}  {pages:>4}")
-            if args.download:
-                is_granted_with_patent = (
-                    b["type"] == "granted"
-                    and b["filename"] == "Granted_claims"
-                    and meta.get("patent_number")
-                )
-                if b["documents"] or is_granted_with_patent:
-                    _download_three_smart(b)
             print()
 
         if args.download:
-            _download_patent_pdf_smart()
-            _download_index_smart()
-            if args.continuations:
-                _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
-            if args.disclaimers:
-                _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
-            _finalize_manifest()
+            _run_main_3bundle()
+            _run_related(output_dir)
         return True
 
     # ------------------------------------------------------------------
@@ -609,35 +632,214 @@ if __name__ == "__main__":
             return False, f"download error: {exc}"
 
     # ------------------------------------------------------------------
-    def _process_continuations(
+    # Per-application download core. Owns its own manifest.json. Reused by
+    # the main flow (full bundle set) and by every continuation / TD sibling.
+    # ------------------------------------------------------------------
+    def _download_app_artifacts(
         app_no: str,
         output_dir: str,
-        manifest: dict,
-        artifact_state: dict,
-        failures: list,
-        legacy_parents: bool = False,
-    ) -> None:
+        patent_no: str | None,
+        grant_date: str | None,
+        bundle_keys: list[str],
+        file_prefix: str,
+        legacy_fallback: bool = False,
+        bundles: list | None = None,
+    ) -> dict:
         """
-        For each continuation/CIP ancestor of app_no, download bundle types
-        listed in CONTINUATION_BUNDLES directly into output_dir with filenames
-        suffixed _parent_{NN}. Parents sorted by filing_date DESC (newest first).
+        Download bundle types listed in ``bundle_keys`` for one application
+        into ``output_dir``. The folder owns its own ``manifest.json`` so
+        re-runs hit per-folder dedup independently.
 
-        Updates artifact_state and failures in place — caller persists the
-        single shared manifest via _finalize_manifest().
+        ``bundle_keys`` is a subset of
+        ``{"initial", "middle", "granted", "index_of_claims", "granted_document"}``.
+
+        ``legacy_fallback=True`` synthesizes an empty granted bundle when the
+        USPTO file wrapper has no docs (typically pre-2001 apps) — srch11 and
+        Google Patents can still source Granted_claims / Granted_document from
+        ``patent_no`` alone.
+
+        Returns ``{"downloaded": [...], "skipped": [...], "failures": [...]}``.
         """
-        parents = _get_continuity(app_no)
+        os.makedirs(output_dir, exist_ok=True)
+        manifest = _load_manifest(output_dir)
+        artifact_state: dict = {}
+        failures:       list = []
+
+        _KEY_TO_TYPE = {"initial": "initial", "middle": "round", "granted": "granted"}
+        wanted_types = {_KEY_TO_TYPE[k] for k in bundle_keys if k in _KEY_TO_TYPE}
+        want_index   = "index_of_claims"  in bundle_keys
+        want_granted_doc = "granted_document" in bundle_keys
+
+        if bundles is None:
+            try:
+                bundles = build_prosecution_bundles(app_no)
+            except Exception as exc:
+                print(f"  ERROR fetching bundles for {app_no}: {exc}", file=sys.stderr)
+                bundles = []
+
+        if not bundles:
+            if not (legacy_fallback and patent_no):
+                print(f"  No prosecution docs for {app_no}", file=sys.stderr)
+                return {"downloaded": [], "skipped": [], "failures": []}
+            print(f"  No prosecution docs for {app_no} — legacy fallback "
+                  f"(srch11 + Google Patents via patent_no={patent_no})",
+                  file=sys.stderr)
+            three = (
+                [{"type": "granted", "filename": "Granted_claims",
+                  "label": "", "documents": []}]
+                if "granted" in wanted_types else []
+            )
+        else:
+            three = _build_three_bundles(bundles)
+
+        # initial / middle / granted
+        for b in three:
+            if b["type"] not in wanted_types:
+                continue
+            is_granted = (b["type"] == "granted" and b["filename"] == "Granted_claims")
+            if not b["documents"] and not is_granted:
+                continue
+            if not b["documents"] and not patent_no:
+                # Granted bundle with no USPTO docs and no patent_no — srch11 cannot help.
+                continue
+
+            key      = f"bundle_{b['type']}"
+            filename = f"{file_prefix}{b['filename']}.pdf"
+            filepath = os.path.join(output_dir, filename)
+
+            if is_granted:
+                fp = _granted_claims_planned_fingerprint(b, patent_no)
+                needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
+                if not needed:
+                    artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                    continue
+                print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+                ok, _src, real_fp, build_reason = _build_granted_claims_pdf(
+                    b, patent_no, grant_date or None, filepath,
+                    log_label=filename.removesuffix(".pdf"),
+                )
+                if ok:
+                    artifact_state[key] = {"filename": filename, "fingerprint": real_fp, "needed": True}
+                else:
+                    print(f"  -> Failed: {build_reason}", file=sys.stderr)
+                    failures.append({"key": key, "filename": filename, "reason": build_reason})
+                continue
+
+            fp = _doc_fingerprint(b["documents"])
+            needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
+            if not needed:
+                artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+                print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                continue
+            print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+            try:
+                pdf = _merge_bundle_pdfs(
+                    {"type": b["type"], "documents": b["documents"]},
+                    show_extra=False, show_intclaim=False,
+                )
+                with open(filepath, "wb") as fh:
+                    fh.write(pdf.getvalue())
+                size_kb = os.path.getsize(filepath) // 1024
+                print(f"  -> Saved {filename} ({size_kb:,} KB)", file=sys.stderr)
+                artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
+            except Exception as exc:
+                print(f"  -> Failed: {exc}", file=sys.stderr)
+                failures.append({"key": key, "filename": filename, "reason": str(exc)})
+
+        # index_of_claims
+        if want_index:
+            key      = "index_of_claims"
+            filename = f"{file_prefix}Index_of_claims.pdf"
+            try:
+                fwclm_docs = [d for d in _get_documents(app_no) if d["code"] == "FWCLM"]
+            except Exception as exc:
+                print(f"  [{filename}] FWCLM lookup failed: {exc} — skipping", file=sys.stderr)
+                fwclm_docs = []
+            if not fwclm_docs:
+                if bundles:
+                    print(f"  [{filename}] no FWCLM docs — skipping", file=sys.stderr)
+            else:
+                fp = _doc_fingerprint(fwclm_docs)
+                needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
+                if not needed:
+                    artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
+                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                else:
+                    print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+                    ok, fail_reason = _download_index_for(app_no, filename, output_dir)
+                    if ok:
+                        artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
+                    else:
+                        failures.append({"key": key, "filename": filename, "reason": fail_reason})
+
+        # granted_document
+        if want_granted_doc:
+            key      = "patent_pdf"
+            filename = f"{file_prefix}Granted_document.pdf"
+            if not patent_no:
+                print(f"  [{filename}] not granted — skipping", file=sys.stderr)
+            else:
+                needed, reason = _needs_download(key, filename, patent_no, manifest, output_dir)
+                if not needed:
+                    artifact_state[key] = {"filename": filename, "fingerprint": patent_no, "needed": False}
+                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
+                else:
+                    print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
+                    ok, fail_reason = _download_granted_for(patent_no, filename, output_dir)
+                    if ok:
+                        artifact_state[key] = {"filename": filename, "fingerprint": patent_no, "needed": True}
+                    else:
+                        failures.append({"key": key, "filename": filename, "reason": fail_reason})
+
+        if artifact_state or failures:
+            _save_manifest(output_dir, app_no, artifact_state, failures)
+
+        downloaded = sum(1 for v in artifact_state.values() if v.get("needed"))
+        skipped    = sum(1 for v in artifact_state.values() if not v.get("needed"))
+        if artifact_state or failures:
+            summary = f"  Folder summary: {downloaded} downloaded, {skipped} skipped"
+            if failures:
+                summary += f", {len(failures)} failed"
+            print(summary, file=sys.stderr)
+
+        return {
+            "downloaded": [v["filename"] for v in artifact_state.values() if v.get("needed")],
+            "skipped":    [v["filename"] for v in artifact_state.values() if not v.get("needed")],
+            "failures":   failures,
+        }
+
+    # ------------------------------------------------------------------
+    def _process_continuations(
+        app_no: str,
+        root: str,
+        main_output_dir: str,
+        legacy_parents: bool = False,
+    ) -> list:
+        """
+        For each continuation/CIP ancestor of ``app_no``, download bundle types
+        listed in ``CONTINUATION_BUNDLES`` into a sibling folder under ``root``.
+
+        Each parent gets its own folder + manifest:
+          <root>/US{parent_patent_no}/                 (granted)
+          <root>/app_{parent_app_no}/                  (un-granted)
+
+        Parents sorted by filing_date DESC (newest first). Returns an ordered
+        list of related-entry dicts to be persisted in the main folder's
+        ``related.json`` (one entry per parent that had at least an attempt).
+        """
+        try:
+            parents = _get_continuity(app_no)
+        except Exception as exc:
+            print(f"  Continuity lookup failed: {exc}", file=sys.stderr)
+            return []
+
         if not parents:
             print("  No continuation parents found.", file=sys.stderr)
-            return
+            return []
 
-        # Newest filing date first. Empty filing_date sorts last.
         parents.sort(key=lambda p: p.get("filing_date") or "0000-00-00", reverse=True)
         width = max(2, len(str(len(parents))))
-
-        _BUNDLE_TYPE = {"initial": "initial", "middle": "round", "granted": "granted"}
-        wanted_types = {_BUNDLE_TYPE[k] for k in CONTINUATION_BUNDLES if k in _BUNDLE_TYPE}
-        want_granted_doc = "granted_document" in CONTINUATION_BUNDLES
-        want_index = "index_of_claims" in CONTINUATION_BUNDLES
 
         print(f"\n  Continuation parents ({len(parents)}, newest first):", file=sys.stderr)
         for i, p in enumerate(parents, 1):
@@ -647,158 +849,90 @@ if __name__ == "__main__":
                   file=sys.stderr)
         print(file=sys.stderr)
 
+        results: list = []
         for i, p in enumerate(parents, 1):
             parent_app = p["app_no"]
             if not parent_app:
                 continue
-            idx = f"{i:0{width}d}"
-            print(f"[Continuation parent_{idx}] {p['relationship']}: {parent_app}",
-                  file=sys.stderr)
 
-            try:
-                parent_bundles = build_prosecution_bundles(parent_app)
-            except Exception as exc:
-                print(f"  ERROR fetching {parent_app}: {exc}", file=sys.stderr)
+            idx              = f"{i:0{width}d}"
+            parent_patent_no = p.get("patent_no") or None
+            folder_name, prefix = _id_for(parent_patent_no, parent_app)
+            parent_dir = os.path.join(root, folder_name)
+
+            print(f"[Continuation {idx}] {p['relationship']}: "
+                  f"{parent_app} → {folder_name}/", file=sys.stderr)
+
+            grant_date = ""
+            if parent_patent_no:
+                try:
+                    grant_date = (_get_metadata(parent_app) or {}).get("grant_date") or ""
+                except Exception:
+                    grant_date = ""
+
+            summary = _download_app_artifacts(
+                app_no          = parent_app,
+                output_dir      = parent_dir,
+                patent_no       = parent_patent_no,
+                grant_date      = grant_date or None,
+                bundle_keys     = CONTINUATION_BUNDLES,
+                file_prefix     = prefix,
+                legacy_fallback = legacy_parents,
+            )
+
+            # Skip unreachable / no-data parents from related.json so it
+            # tracks only folders that actually exist.
+            if not summary["downloaded"] and not summary["skipped"] and not summary["failures"]:
                 continue
 
-            parent_patent_no = p.get("patent_no") or None
-            if not parent_bundles:
-                if not (legacy_parents and parent_patent_no):
-                    print(f"  No prosecution docs for {parent_app}", file=sys.stderr)
-                    continue
-                print(f"  No prosecution docs for {parent_app} — legacy fallback "
-                      f"(srch11 + Google Patents via patent_no={parent_patent_no})",
-                      file=sys.stderr)
-                three = (
-                    [{"type": "granted", "filename": "Granted_claims",
-                      "label": "", "documents": []}]
-                    if "granted" in wanted_types else []
-                )
-            else:
-                three = _build_three_bundles(parent_bundles)
+            try:
+                folder_rel = os.path.relpath(parent_dir, main_output_dir)
+            except ValueError:
+                folder_rel = parent_dir
 
-            parent_grant_date: str | None = None
-            for b in three:
-                if b["type"] not in wanted_types:
-                    continue
-                is_granted_bundle = (
-                    b["type"] == "granted" and b["filename"] == "Granted_claims"
-                )
-                if not b["documents"] and not is_granted_bundle:
-                    continue
-                if not b["documents"] and not parent_patent_no:
-                    continue
+            results.append({
+                "index":        i,
+                "relationship": p.get("relationship"),
+                "app_no":       parent_app,
+                "patent_no":    parent_patent_no,
+                "filing_date":  p.get("filing_date"),
+                "status":       p.get("status"),
+                "folder_name":  folder_name,
+                "folder":       folder_rel,
+                "downloaded":   summary["downloaded"],
+                "failures":     summary["failures"],
+            })
 
-                key      = f"cont_{idx}_bundle_{b['type']}"
-                filename = f"{b['filename']}_parent_{idx}.pdf"
-                filepath = os.path.join(output_dir, filename)
-
-                if is_granted_bundle:
-                    fp = _granted_claims_planned_fingerprint(b, parent_patent_no)
-                    needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
-                    if not needed:
-                        artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
-                        print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
-                        continue
-                    print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-                    if parent_grant_date is None and parent_patent_no:
-                        parent_meta = _get_metadata(parent_app) or {}
-                        parent_grant_date = parent_meta.get("grant_date") or ""
-                    ok, _src, real_fp, build_reason = _build_granted_claims_pdf(
-                        b, parent_patent_no, parent_grant_date or None, filepath,
-                        log_label=filename.removesuffix(".pdf"),
-                    )
-                    if ok:
-                        artifact_state[key] = {
-                            "filename": filename, "fingerprint": real_fp, "needed": True
-                        }
-                    else:
-                        print(f"  -> Failed: {build_reason}", file=sys.stderr)
-                        failures.append({"key": key, "filename": filename, "reason": build_reason})
-                    continue
-
-                fp       = _doc_fingerprint(b["documents"])
-                needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
-                if not needed:
-                    artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
-                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
-                    continue
-                print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-                try:
-                    pdf = _merge_bundle_pdfs(
-                        {"type": b["type"], "documents": b["documents"]},
-                        show_extra=False, show_intclaim=False,
-                    )
-                    with open(filepath, "wb") as fh:
-                        fh.write(pdf.getvalue())
-                    size_kb = os.path.getsize(filepath) // 1024
-                    print(f"  -> Saved {filename} ({size_kb:,} KB)", file=sys.stderr)
-                    artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
-                except Exception as exc:
-                    print(f"  -> Failed: {exc}", file=sys.stderr)
-                    failures.append({"key": key, "filename": filename, "reason": str(exc)})
-
-            if want_index:
-                key      = f"cont_{idx}_index_of_claims"
-                filename = f"Index_of_claims_parent_{idx}.pdf"
-                fwclm_docs = [d for d in _get_documents(parent_app) if d["code"] == "FWCLM"]
-                if not fwclm_docs:
-                    print(f"  [{filename}] no FWCLM docs — skipping", file=sys.stderr)
-                else:
-                    fp = _doc_fingerprint(fwclm_docs)
-                    needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
-                    if not needed:
-                        artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
-                        print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
-                    else:
-                        print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-                        ok, fail_reason = _download_index_for(parent_app, filename, output_dir)
-                        if ok:
-                            artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
-                        else:
-                            failures.append({"key": key, "filename": filename, "reason": fail_reason})
-
-            if want_granted_doc:
-                patent_no = p.get("patent_no")
-                key      = f"cont_{idx}_patent_pdf"
-                filename = f"Granted_document_parent_{idx}.pdf"
-                if not patent_no:
-                    print(f"  [{filename}] parent not granted — skipping", file=sys.stderr)
-                    continue
-                needed, reason = _needs_download(key, filename, patent_no, manifest, output_dir)
-                if not needed:
-                    artifact_state[key] = {"filename": filename, "fingerprint": patent_no, "needed": False}
-                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
-                    continue
-                print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-                ok, fail_reason = _download_granted_for(patent_no, filename, output_dir)
-                if ok:
-                    artifact_state[key] = {"filename": filename, "fingerprint": patent_no, "needed": True}
-                else:
-                    failures.append({"key": key, "filename": filename, "reason": fail_reason})
+        return results
 
     # ------------------------------------------------------------------
     def _process_disclaimers(
         app_no: str,
-        output_dir: str,
-        manifest: dict,
-        artifact_state: dict,
-        failures: list,
+        root: str,
+        main_output_dir: str,
         legacy_parents: bool = False,
-    ) -> None:
+    ) -> list:
         """
-        For each APPROVED Terminal Disclaimer (DISQ) on app_no, download bundle
-        types in DISCLAIMER_BUNDLES for every cited prior patent directly into
-        output_dir with filenames suffixed _TD_{NN}.
+        For each APPROVED Terminal Disclaimer (DISQ) on ``app_no``, download
+        bundle types in ``DISCLAIMER_BUNDLES`` for every cited prior patent
+        into a sibling folder under ``root``.
+
+        Each cited patent gets its own folder + manifest:
+          <root>/US{td_patent_no}/
 
         Cited patents are reversed (descending) from the order they appeared
-        across DISQ decisions. Updates artifact_state/failures in place — caller
-        persists the single shared manifest.
+        across DISQ decisions. Returns an ordered list of related-entry dicts
+        to be persisted in the main folder's ``related.json``.
         """
-        decisions = get_disq_decisions(app_no)
+        try:
+            decisions = get_disq_decisions(app_no)
+        except Exception as exc:
+            print(f"  DISQ lookup failed: {exc}", file=sys.stderr)
+            return []
+
         if not decisions:
             print("  No DISQ documents found.", file=sys.stderr)
-            return
+            return []
 
         # Collect approved cited patents (de-dup, preserve order across DISQs).
         cited: list[str] = []
@@ -815,15 +949,10 @@ if __name__ == "__main__":
 
         if not cited:
             print("  No approved Terminal Disclaimers with cited patents.", file=sys.stderr)
-            return
+            return []
 
         # Descending order — reverse the natural collection order.
         cited.reverse()
-
-        _BUNDLE_TYPE = {"initial": "initial", "middle": "round", "granted": "granted"}
-        wanted_types = {_BUNDLE_TYPE[k] for k in DISCLAIMER_BUNDLES if k in _BUNDLE_TYPE}
-        want_granted_doc = "granted_document" in DISCLAIMER_BUNDLES
-        want_index = "index_of_claims" in DISCLAIMER_BUNDLES
 
         width = max(2, len(str(len(cited))))
         print(f"\n  Terminal Disclaimer cited patents ({len(cited)} from "
@@ -832,9 +961,10 @@ if __name__ == "__main__":
             print(f"    TD_{i:0{width}d}. US{pn}", file=sys.stderr)
         print(file=sys.stderr)
 
+        results: list = []
         for i, patent_no in enumerate(cited, 1):
             idx = f"{i:0{width}d}"
-            print(f"[Disclaimer TD_{idx}] US{patent_no}", file=sys.stderr)
+            print(f"[Disclaimer {idx}] US{patent_no}", file=sys.stderr)
             try:
                 td_app = resolve_patent_to_application(patent_no)
             except Exception as exc:
@@ -844,125 +974,45 @@ if __name__ == "__main__":
                 print(f"  Could not resolve US{patent_no} — skipping", file=sys.stderr)
                 continue
 
+            folder_name, prefix = _id_for(patent_no, td_app)
+            td_dir = os.path.join(root, folder_name)
+            print(f"  → {folder_name}/", file=sys.stderr)
+
+            grant_date = ""
             try:
-                td_bundles = build_prosecution_bundles(td_app)
-            except Exception as exc:
-                print(f"  ERROR fetching {td_app}: {exc}", file=sys.stderr)
+                grant_date = (_get_metadata(td_app) or {}).get("grant_date") or ""
+            except Exception:
+                grant_date = ""
+
+            summary = _download_app_artifacts(
+                app_no          = td_app,
+                output_dir      = td_dir,
+                patent_no       = patent_no,
+                grant_date      = grant_date or None,
+                bundle_keys     = DISCLAIMER_BUNDLES,
+                file_prefix     = prefix,
+                legacy_fallback = legacy_parents,
+            )
+
+            if not summary["downloaded"] and not summary["skipped"] and not summary["failures"]:
                 continue
 
-            if not td_bundles:
-                if not (legacy_parents and patent_no):
-                    print(f"  No prosecution docs for {td_app}", file=sys.stderr)
-                    continue
-                print(f"  No prosecution docs for {td_app} — legacy fallback "
-                      f"(srch11 + Google Patents via patent_no={patent_no})",
-                      file=sys.stderr)
-                three = (
-                    [{"type": "granted", "filename": "Granted_claims",
-                      "label": "", "documents": []}]
-                    if "granted" in wanted_types else []
-                )
-            else:
-                three = _build_three_bundles(td_bundles)
+            try:
+                folder_rel = os.path.relpath(td_dir, main_output_dir)
+            except ValueError:
+                folder_rel = td_dir
 
-            td_grant_date: str | None = None
-            for b in three:
-                if b["type"] not in wanted_types:
-                    continue
-                is_granted_bundle = (
-                    b["type"] == "granted" and b["filename"] == "Granted_claims"
-                )
-                # Skip non-granted bundles when their docs are empty (existing
-                # behavior). Granted bundle goes through the source-picking
-                # helper, which can build from srch11 even with empty USPTO docs.
-                if not b["documents"] and not is_granted_bundle:
-                    continue
-                if not b["documents"] and not patent_no:
-                    continue
+            results.append({
+                "index":       i,
+                "patent_no":   patent_no,
+                "td_app_no":   td_app,
+                "folder_name": folder_name,
+                "folder":      folder_rel,
+                "downloaded":  summary["downloaded"],
+                "failures":    summary["failures"],
+            })
 
-                key      = f"td_{idx}_bundle_{b['type']}"
-                filename = f"{b['filename']}_TD_{idx}.pdf"
-                filepath = os.path.join(output_dir, filename)
-
-                if is_granted_bundle:
-                    fp = _granted_claims_planned_fingerprint(b, patent_no)
-                    needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
-                    if not needed:
-                        artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
-                        print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
-                        continue
-                    print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-                    if td_grant_date is None:
-                        td_meta = _get_metadata(td_app) or {}
-                        td_grant_date = td_meta.get("grant_date") or ""
-                    ok, _src, real_fp, build_reason = _build_granted_claims_pdf(
-                        b, patent_no, td_grant_date or None, filepath,
-                        log_label=filename.removesuffix(".pdf"),
-                    )
-                    if ok:
-                        artifact_state[key] = {
-                            "filename": filename, "fingerprint": real_fp, "needed": True
-                        }
-                    else:
-                        print(f"  -> Failed: {build_reason}", file=sys.stderr)
-                        failures.append({"key": key, "filename": filename, "reason": build_reason})
-                    continue
-
-                fp       = _doc_fingerprint(b["documents"])
-                needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
-                if not needed:
-                    artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
-                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
-                    continue
-                print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-                try:
-                    pdf = _merge_bundle_pdfs(
-                        {"type": b["type"], "documents": b["documents"]},
-                        show_extra=False, show_intclaim=False,
-                    )
-                    with open(filepath, "wb") as fh:
-                        fh.write(pdf.getvalue())
-                    size_kb = os.path.getsize(filepath) // 1024
-                    print(f"  -> Saved {filename} ({size_kb:,} KB)", file=sys.stderr)
-                    artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
-                except Exception as exc:
-                    print(f"  -> Failed: {exc}", file=sys.stderr)
-                    failures.append({"key": key, "filename": filename, "reason": str(exc)})
-
-            if want_index:
-                key      = f"td_{idx}_index_of_claims"
-                filename = f"Index_of_claims_TD_{idx}.pdf"
-                fwclm_docs = [d for d in _get_documents(td_app) if d["code"] == "FWCLM"]
-                if not fwclm_docs:
-                    print(f"  [{filename}] no FWCLM docs — skipping", file=sys.stderr)
-                else:
-                    fp = _doc_fingerprint(fwclm_docs)
-                    needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
-                    if not needed:
-                        artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
-                        print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
-                    else:
-                        print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-                        ok, fail_reason = _download_index_for(td_app, filename, output_dir)
-                        if ok:
-                            artifact_state[key] = {"filename": filename, "fingerprint": fp, "needed": True}
-                        else:
-                            failures.append({"key": key, "filename": filename, "reason": fail_reason})
-
-            if want_granted_doc:
-                key      = f"td_{idx}_patent_pdf"
-                filename = f"Granted_document_TD_{idx}.pdf"
-                needed, reason = _needs_download(key, filename, patent_no, manifest, output_dir)
-                if not needed:
-                    artifact_state[key] = {"filename": filename, "fingerprint": patent_no, "needed": False}
-                    print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
-                    continue
-                print(f"  [{filename}] {reason} — downloading", file=sys.stderr)
-                ok, fail_reason = _download_granted_for(patent_no, filename, output_dir)
-                if ok:
-                    artifact_state[key] = {"filename": filename, "fingerprint": patent_no, "needed": True}
-                else:
-                    failures.append({"key": key, "filename": filename, "reason": fail_reason})
+        return results
 
     # ------------------------------------------------------------------
     parser = argparse.ArgumentParser(
@@ -970,11 +1020,15 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single patent
+  # Single patent → ./us_patents/US{patent_no}/US{patent_no}_{filename}.pdf
   python bundles_api.py 16123456
+  python bundles_api.py 16123456 --download
+
+  # Single patent into a custom root → ./pdfs/US{patent_no}/...
   python bundles_api.py 16123456 --download --output-dir ./pdfs
 
-  # Bulk download — space, comma, or pipe separated; each gets its own subfolder
+  # Bulk download — space, comma, or pipe separated; each patent + its
+  # continuations / TDs all land as siblings inside <root>
   python bundles_api.py US10897328B2 US10912060B2 US10952166B2 --download --output-dir ./bulk
   python bundles_api.py "US10897328B2,US10912060B2,US10952166B2" --download --output-dir ./bulk
   python bundles_api.py "US10897328B2|US10912060B2|US10952166B2" --download --output-dir ./bulk
@@ -987,24 +1041,25 @@ Examples:
   python bundles_api.py 16123456 --separate-bundles --show-extra --show-intclaim
   python bundles_api.py 16123456 --separate-bundles --download --output-dir ./pdfs
 
-  # Also download REM-CTNF-NOA + Granted_document (per us/config.py CONTINUATION_BUNDLES)
-  # for every continuation/CIP ancestor. Files saved into the input patent's own folder
-  # with names like REM-CTNF-NOA_parent_01.pdf, Granted_document_parent_01.pdf.
-  # Parents listed newest filing date first.
-  python bundles_api.py 18221238 --download --output-dir ./pdfs --continuations
+  # Also download bundle types in us/config.py CONTINUATION_BUNDLES for every
+  # CON/CIP ancestor. Each parent gets its own sibling folder
+  # (./us_patents/US{parent_patent_no}/) with files like
+  # US{parent_patent_no}_REM-CTNF-NOA.pdf. Order recorded in main folder's
+  # related.json (newest filing date first).
+  python bundles_api.py 18221238 --download --continuations
 
-  # Also OCR every DISQ (Terminal Disclaimer decision); for each approved one,
-  # pull REM-CTNF-NOA + Granted_document (per DISCLAIMER_BUNDLES) for every cited
-  # prior patent. Files saved into the input patent's own folder with names like
-  # REM-CTNF-NOA_TD_01.pdf, Granted_document_TD_01.pdf (descending order).
-  python bundles_api.py 12141042 --download --output-dir ./pdfs --disclaimers
+  # OCR every DISQ (Terminal Disclaimer decision); for each approved one, pull
+  # bundle types in DISCLAIMER_BUNDLES for every cited prior patent. Each cited
+  # patent gets its own sibling folder. Order recorded in related.json
+  # (descending).
+  python bundles_api.py 12141042 --download --disclaimers
         """,
     )
     parser.add_argument(
         "application_number",
         nargs="+",
         help="One or more USPTO application/patent numbers (space-, comma-, or pipe-separated). "
-             "In bulk mode each patent gets its own subfolder inside --output-dir.",
+             "Each patent — main, continuations, TDs — lands in its own sibling folder under <root>.",
     )
     parser.add_argument("--separate-bundles", action="store_true",
                         help="One PDF per prosecution round (default: merge into 3 PDFs)")
@@ -1015,8 +1070,10 @@ Examples:
     parser.add_argument("--download",         action="store_true",
                         help="Download each bundle as a merged PDF to disk")
     parser.add_argument("--output-dir",       default=None,
-                        help="Directory to save PDFs. Single patent: saves here directly. "
-                             "Bulk mode: each patent gets its own US{no}/ subfolder inside this dir.")
+                        help="Root directory holding every per-patent folder "
+                             "(default: ./us_patents/). Main, continuation parents, "
+                             "and TD-cited patents all land as siblings here, each in "
+                             "its own US{patent_no}/ (or app_{app_no}/) subfolder.")
     parser.add_argument("--base-url",         default="http://localhost:7901",
                         help="Base URL for download_url links (default: http://localhost:7901)")
     parser.add_argument("--patent",            action="store_true",
@@ -1025,15 +1082,16 @@ Examples:
                         help="Print a human-readable text table instead of JSON")
     parser.add_argument("--continuations",    action="store_true",
                         help="Also download bundles for every continuation/CIP ancestor "
-                             "(types in us/config.py CONTINUATION_BUNDLES). Files land in "
-                             "the same folder as the input patent's bundles, suffixed "
-                             "_parent_NN. Parents listed newest filing date first.")
+                             "(types in us/config.py CONTINUATION_BUNDLES). Each parent gets "
+                             "its own sibling folder under <root>. Order (newest filing date "
+                             "first) recorded in main folder's related.json.")
     parser.add_argument("--disclaimers",      action="store_true",
                         help="Also OCR every Terminal Disclaimer (DISQ) decision; for each "
                              "approved disclaimer download bundles for every cited prior "
-                             "patent (types in us/config.py DISCLAIMER_BUNDLES). Files land "
-                             "in the same folder as the input patent's bundles, suffixed "
-                             "_TD_NN (descending order). Requires pdftoppm and tesseract on PATH.")
+                             "patent (types in us/config.py DISCLAIMER_BUNDLES). Each cited "
+                             "patent gets its own sibling folder under <root>. Order "
+                             "(descending) recorded in main folder's related.json. "
+                             "Requires pdftoppm and tesseract on PATH.")
     parser.add_argument("--legacy-parents",   action="store_true",
                         help="For --continuations / --disclaimers parents that have no "
                              "USPTO file-wrapper docs (typically pre-2001 apps), still "
@@ -1049,27 +1107,28 @@ Examples:
         raw_tokens.extend(re.split(r"[,|]+", token))
     inputs = [t.strip() for t in raw_tokens if t.strip()]
 
+    # Single shared root for every patent — main, continuations, TDs all
+    # land as siblings here. Default `./us_patents/` if --output-dir omitted.
+    root = args.output_dir if args.output_dir is not None else "us_patents"
+
     if len(inputs) == 1:
-        ok = _process_one_patent(inputs[0], args, parent_output_dir=None)
+        ok = _process_one_patent(inputs[0], args, parent_output_dir=root)
         sys.exit(0 if ok else 1)
 
     # ------------------------------------------------------------------ Bulk mode
     from tqdm import tqdm
 
-    parent_dir = args.output_dir  # None → each patent defaults to ./US{no}/ in cwd
     n = len(inputs)
     print(f"\nBulk mode: {n} patents", file=sys.stderr)
-    if parent_dir:
-        print(f"Output root: {parent_dir}/US{{patent_no}}/", file=sys.stderr)
-    else:
-        print("Output root: ./US{patent_no}/ (per patent)", file=sys.stderr)
+    print(f"Output root: {root}/  (each patent + its continuations/TDs as siblings)",
+          file=sys.stderr)
 
     results: list[tuple[str, bool]] = []
     pbar = tqdm(inputs, desc="Patents", unit="patent")
     for inp in pbar:
         pbar.set_postfix_str(inp)
         tqdm.write(f"\n{'='*60}\n[{len(results)+1}/{n}] {inp}\n{'='*60}")
-        ok = _process_one_patent(inp, args, parent_output_dir=parent_dir)
+        ok = _process_one_patent(inp, args, parent_output_dir=root)
         results.append((inp, ok))
 
     succeeded  = sum(1 for _, ok in results if ok)

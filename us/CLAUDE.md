@@ -54,35 +54,39 @@ Codes are bucketed into sets in `config.py`:
 | `11973593` | try application first; fallback to patent lookup |
 | `11973593 --patent` | force patent lookup |
 
+## Output Layout
+
+Every patent — main, continuations, TDs — lives in its own sibling folder under one root directory:
+
+- `<root>` = `--output-dir` if set, else `./us_patents/`.
+- Granted patent → folder `US{patent_no}/`, files prefixed `US{patent_no}_`.
+- Un-granted application → folder `app_{app_no}/`, files prefixed `app_{app_no}_`.
+- Each folder owns its own `manifest.json` for per-folder dedup.
+
+`bundles_api._download_app_artifacts(app_no, output_dir, patent_no, grant_date, bundle_keys, file_prefix, legacy_fallback, bundles=None)` is the single per-application download core, used by:
+- the main 3-bundle flow (full bundle set),
+- `_process_continuations()` (one call per parent → its own sibling folder),
+- `_process_disclaimers()` (one call per TD-cited patent → its own sibling folder).
+
 ## Continuation Downloads (`--continuations`)
 
 `client._get_continuity(app_no)` calls `/continuity` and returns parents whose `claimParentageTypeCode` is in `config.CONTINUATION_FOLLOW_CODES` (default `{"CON", "CIP"}`). USPTO returns the full ancestor chain, so one call covers everything.
 
-`bundles_api._process_continuations()` sorts parents by `parentApplicationFilingDate` **descending** (newest first), builds 3-bundle layout for each, and downloads only the types listed in `config.CONTINUATION_BUNDLES` (default `["initial", "middle", "granted", "index_of_claims"]`). All parent files land **directly in the input patent's output folder** (no subfolders), suffixed `_parent_{NN}`:
+`bundles_api._process_continuations(app_no, root, main_output_dir, legacy_parents)` sorts parents by `parentApplicationFilingDate` **descending** (newest first) and, for each parent, calls `_download_app_artifacts` into a sibling folder under `<root>` named `US{parent_patent_no}/` (or `app_{parent_app_no}/` when un-granted). Bundle types come from `config.CONTINUATION_BUNDLES` (default `["initial", "middle", "granted", "index_of_claims"]`).
 
-- `"initial"`          → `Initial_claims_parent_{NN}.pdf`
-- `"middle"`           → `REM-CTNF-NOA_parent_{NN}.pdf`
-- `"granted"`          → `Granted_claims_parent_{NN}.pdf`
-- `"index_of_claims"`  → `Index_of_claims_parent_{NN}.pdf` (most recent FWCLM via `_merge_fwclm_pdf`)
-- `"granted_document"` → `Granted_document_parent_{NN}.pdf` (full Google Patents PDF)
-
-The function takes the shared `manifest`, `artifact_state`, `failures` from `_process_one_patent` and updates them in place — there is **one** `manifest.json` in the input patent's folder, no per-parent manifests.
+Filename pattern (granted parent): `US{parent_patent_no}_{bundle_filename}.pdf`. Each parent folder has its own `manifest.json`. The function returns an ordered list of related-entry dicts that the caller persists in the main folder's `related.json`.
 
 ## Terminal Disclaimer Downloads (`--disclaimers`)
 
 `disclaimer.get_disq_decisions(app_no)` filters `_get_documents()` for `code == "DISQ"`, OCRs each PDF (`pdftoppm` -r 300 + `tesseract`), and returns `[{date, pdf_url, approved, patents}]`. `parse_disq_text()` detects approval via "TDs approved/disapproved" footer or `[x] APPROVED` checkbox, and extracts US patent numbers via the `\d{1,2},\d{3},\d{3}` regex (with bare-digit fallback).
 
-`bundles_api._process_disclaimers()` collects approved cited patents (de-duped), **reverses** the list (descending), resolves each via `resolve_patent_to_application()`, builds 3-bundle layout, and downloads the types in `config.DISCLAIMER_BUNDLES` (default `["initial", "middle", "granted", "index_of_claims"]`). All TD files land **directly in the input patent's output folder** (no subfolders), suffixed `_TD_{NN}`:
+`bundles_api._process_disclaimers(app_no, root, main_output_dir, legacy_parents)` collects approved cited patents (de-duped), **reverses** the list (descending), resolves each via `resolve_patent_to_application()`, and calls `_download_app_artifacts` into a sibling folder `US{td_patent_no}/` under `<root>`. Bundle types come from `config.DISCLAIMER_BUNDLES`. Each cited patent's folder has its own `manifest.json`.
 
-- `"initial"`          → `Initial_claims_TD_{NN}.pdf`
-- `"middle"`           → `REM-CTNF-NOA_TD_{NN}.pdf`
-- `"granted"`          → `Granted_claims_TD_{NN}.pdf`
-- `"index_of_claims"`  → `Index_of_claims_TD_{NN}.pdf` (most recent FWCLM via `_merge_fwclm_pdf`)
-- `"granted_document"` → `Granted_document_TD_{NN}.pdf`
+Disapproved decisions are skipped. OCR binaries must be on PATH — install via `brew install poppler tesseract`.
 
-Same shared-manifest pattern as continuations. Disapproved decisions are skipped.
+## related.json (main folder only)
 
-OCR binaries must be on PATH — install via `brew install poppler tesseract`.
+`bundles_api._save_related(...)` writes `related.json` to the main patent's folder when `--continuations` and/or `--disclaimers` returns at least one entry. It records the ordered list of sibling folder paths (relative to main) and metadata for every continuation parent and TD-cited patent. Order matches the legacy `_parent_NN` / `_TD_NN` numbering.
 
 ## Granted-document & index-of-claims helpers
 
