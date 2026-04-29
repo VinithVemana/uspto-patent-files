@@ -37,6 +37,20 @@ _OA_CODE_ORDER = {"CTNF": 0, "CTFR": 0, "892": 1, "FWCLM": 2, "SRFW": 3, "SRNT":
 _MIDDLE_CODE_ORDER = ["REM", "CTNF", "NOA"]
 
 # ---------------------------------------------------------------------------
+# Source patent download settings  (the input/main patent in --download mode)
+# ---------------------------------------------------------------------------
+
+# Bundle types to download for the original source patent (the app number
+# passed on the CLI). Files land in <root>/US{patent_no}/ (or app_{app_no}/)
+# prefixed with US{patent_no}_ (or app_{app_no}_).
+#   "initial"          →  {prefix}Initial_claims.pdf
+#   "middle"           →  {prefix}REM-CTNF-NOA.pdf
+#   "granted"          →  {prefix}Granted_claims.pdf
+#   "index_of_claims"  →  {prefix}Index_of_claims.pdf  (most recent FWCLM)
+#   "granted_document" →  {prefix}Granted_document.pdf  (full Google Patents PDF)
+SOURCE_BUNDLES = ["initial", "middle", "granted", "index_of_claims", "granted_document"]
+
+# ---------------------------------------------------------------------------
 # Continuation download settings  (edit these to change --continuations behavior)
 # ---------------------------------------------------------------------------
 

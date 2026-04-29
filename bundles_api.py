@@ -107,7 +107,7 @@ WEB SERVER
 
 # Re-export the full public surface so bundles_server.py can keep its
 # existing `from bundles_api import (...)` import unchanged.
-from us.config import HEADERS, GOOGLE_PATENTS_HEADERS, CONTINUATION_BUNDLES, DISCLAIMER_BUNDLES
+from us.config import HEADERS, GOOGLE_PATENTS_HEADERS, SOURCE_BUNDLES, CONTINUATION_BUNDLES, DISCLAIMER_BUNDLES
 from us.client import fetch_json, _get_metadata, _get_documents, _get_continuity
 from us.resolver import (
     resolve_application_number,
@@ -555,8 +555,7 @@ if __name__ == "__main__":
                 output_dir      = output_dir,
                 patent_no       = patent_no_meta,
                 grant_date      = meta.get("grant_date"),
-                bundle_keys     = ["initial", "middle", "granted",
-                                   "index_of_claims", "granted_document"],
+                bundle_keys     = SOURCE_BUNDLES,
                 file_prefix     = prefix,
                 legacy_fallback = False,
                 bundles         = bundles,
