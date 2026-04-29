@@ -45,10 +45,18 @@ RUN FROM THE COMMAND LINE
                           patent. Files land in the input patent's folder
                           suffixed _TD_NN (descending order). Types per
                           DISCLAIMER_BUNDLES. Requires pdftoppm + tesseract on PATH.
+      --legacy-parents    For --continuations / --disclaimers parents that have
+                          no USPTO file-wrapper docs (typically pre-2001 apps),
+                          still attempt Granted_claims via srch11 and
+                          Granted_document via Google Patents when the parent
+                          has a patent number. initial / middle /
+                          index_of_claims are skipped (no USPTO docs to merge).
       --base-url URL      Base URL for download_url links (default: http://localhost:7901)
 
-      python bundles_api.py 18221238 --download  --continuations
+      python bundles_api.py US8332478B2 --download  --continuations
       python bundles_api.py 12141042 --download  --disclaimers
+      python bundles_api.py US8332478B2 --download  --continuations --legacy-parents  # CIP/CON parents pre-2001
+      python bundles_api.py US8332478B2 --download  --disclaimers --legacy-parents    # TD-cited patents pre-2001
 
 GRANTED CLAIMS SOURCE
 ---------------------
@@ -374,9 +382,9 @@ if __name__ == "__main__":
                     _download_patent_pdf_smart()
                     _download_index_smart()
                     if args.continuations:
-                        _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures)
+                        _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
                     if args.disclaimers:
-                        _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures)
+                        _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
                     _finalize_manifest()
                 return True
 
@@ -418,9 +426,9 @@ if __name__ == "__main__":
                 _download_patent_pdf_smart()
                 _download_index_smart()
                 if args.continuations:
-                    _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures)
+                    _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
                 if args.disclaimers:
-                    _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures)
+                    _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
                 _finalize_manifest()
             return True
 
@@ -507,9 +515,9 @@ if __name__ == "__main__":
                 _download_patent_pdf_smart()
                 _download_index_smart()
                 if args.continuations:
-                    _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures)
+                    _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
                 if args.disclaimers:
-                    _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures)
+                    _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
                 _finalize_manifest()
             return True
 
@@ -553,9 +561,9 @@ if __name__ == "__main__":
             _download_patent_pdf_smart()
             _download_index_smart()
             if args.continuations:
-                _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures)
+                _process_continuations(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
             if args.disclaimers:
-                _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures)
+                _process_disclaimers(app_no, output_dir, manifest, _artifact_state, _failures, args.legacy_parents)
             _finalize_manifest()
         return True
 
@@ -607,6 +615,7 @@ if __name__ == "__main__":
         manifest: dict,
         artifact_state: dict,
         failures: list,
+        legacy_parents: bool = False,
     ) -> None:
         """
         For each continuation/CIP ancestor of app_no, download bundle types
@@ -648,15 +657,26 @@ if __name__ == "__main__":
 
             try:
                 parent_bundles = build_prosecution_bundles(parent_app)
-                if not parent_bundles:
-                    print(f"  No prosecution docs for {parent_app}", file=sys.stderr)
-                    continue
             except Exception as exc:
                 print(f"  ERROR fetching {parent_app}: {exc}", file=sys.stderr)
                 continue
 
-            three = _build_three_bundles(parent_bundles)
             parent_patent_no = p.get("patent_no") or None
+            if not parent_bundles:
+                if not (legacy_parents and parent_patent_no):
+                    print(f"  No prosecution docs for {parent_app}", file=sys.stderr)
+                    continue
+                print(f"  No prosecution docs for {parent_app} — legacy fallback "
+                      f"(srch11 + Google Patents via patent_no={parent_patent_no})",
+                      file=sys.stderr)
+                three = (
+                    [{"type": "granted", "filename": "Granted_claims",
+                      "label": "", "documents": []}]
+                    if "granted" in wanted_types else []
+                )
+            else:
+                three = _build_three_bundles(parent_bundles)
+
             parent_grant_date: str | None = None
             for b in three:
                 if b["type"] not in wanted_types:
@@ -764,6 +784,7 @@ if __name__ == "__main__":
         manifest: dict,
         artifact_state: dict,
         failures: list,
+        legacy_parents: bool = False,
     ) -> None:
         """
         For each APPROVED Terminal Disclaimer (DISQ) on app_no, download bundle
@@ -825,14 +846,25 @@ if __name__ == "__main__":
 
             try:
                 td_bundles = build_prosecution_bundles(td_app)
-                if not td_bundles:
-                    print(f"  No prosecution docs for {td_app}", file=sys.stderr)
-                    continue
             except Exception as exc:
                 print(f"  ERROR fetching {td_app}: {exc}", file=sys.stderr)
                 continue
 
-            three = _build_three_bundles(td_bundles)
+            if not td_bundles:
+                if not (legacy_parents and patent_no):
+                    print(f"  No prosecution docs for {td_app}", file=sys.stderr)
+                    continue
+                print(f"  No prosecution docs for {td_app} — legacy fallback "
+                      f"(srch11 + Google Patents via patent_no={patent_no})",
+                      file=sys.stderr)
+                three = (
+                    [{"type": "granted", "filename": "Granted_claims",
+                      "label": "", "documents": []}]
+                    if "granted" in wanted_types else []
+                )
+            else:
+                three = _build_three_bundles(td_bundles)
+
             td_grant_date: str | None = None
             for b in three:
                 if b["type"] not in wanted_types:
@@ -1002,6 +1034,13 @@ Examples:
                              "patent (types in us/config.py DISCLAIMER_BUNDLES). Files land "
                              "in the same folder as the input patent's bundles, suffixed "
                              "_TD_NN (descending order). Requires pdftoppm and tesseract on PATH.")
+    parser.add_argument("--legacy-parents",   action="store_true",
+                        help="For --continuations / --disclaimers parents that have no "
+                             "USPTO file-wrapper docs (typically pre-2001 apps), still "
+                             "attempt Granted_claims via srch11 and Granted_document via "
+                             "Google Patents when the parent has a patent number. "
+                             "initial / middle / index_of_claims are skipped because there "
+                             "are no USPTO docs to merge.")
     args = parser.parse_args()
 
     # Flatten all tokens — split on commas and pipes so any separator style works

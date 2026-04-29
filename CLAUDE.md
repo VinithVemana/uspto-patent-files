@@ -19,9 +19,11 @@ python bundles_api.py "US10897328B2,US10912060B2" --download --output-dir ./bulk
 python bundles_api.py 16123456 --separate-bundles
 python bundles_api.py 18221238 --download --output-dir ./pdfs --continuations  # also pulls every CON/CIP ancestor
 python bundles_api.py 12141042 --download --output-dir ./pdfs --disclaimers    # also pulls bundles for every patent cited in an approved DISQ
+python bundles_api.py US8332478B2 --download --continuations --legacy-parents  # CIP/CON parents pre-2001 (no USPTO docs) → Granted_claims via srch11 + Granted_document via Google Patents
+python bundles_api.py 12141042 --download --disclaimers --legacy-parents       # TD-cited patents pre-2001 (no USPTO docs) → same fallback
 ```
 
-Key flags: `--patent`, `--separate-bundles`, `--show-extra`, `--show-intclaim`, `--download`, `--output-dir`, `--base-url`, `--text`, `--continuations`, `--disclaimers`
+Key flags: `--patent`, `--separate-bundles`, `--show-extra`, `--show-intclaim`, `--download`, `--output-dir`, `--base-url`, `--text`, `--continuations`, `--disclaimers`, `--legacy-parents`
 
 ### `--continuations`
 
@@ -35,6 +37,19 @@ Bundle types per parent controlled by `us/config.py::CONTINUATION_BUNDLES` (defa
 - `"granted_document"` → `Granted_document_parent_{NN}.pdf` (full Google Patents PDF)
 
 USPTO `/continuity` returns the **full ancestor chain** (not just direct parent), so one call covers the whole tree — no recursion needed.
+
+### `--legacy-parents`
+
+Optional add-on for `--continuations` and `--disclaimers`. USPTO Open Data Portal returns empty `/meta-data` and `/documents` for **pre-2001 applications** (typically `09XXXXXXX` series and earlier), so without this flag those parents are skipped with `No prosecution docs for {app_no}`.
+
+When `--legacy-parents` is set, every parent that has a `patent_no` in continuity (or every TD-cited patent — TDs always have a patent_no since they're resolved from one) still attempts:
+
+- `"granted"` → `Granted_claims_parent_{NN}.pdf` / `Granted_claims_TD_{NN}.pdf` via **srch11** (Dolcera Solr lookup by patent_no — no USPTO file wrapper needed).
+- `"granted_document"` → `Granted_document_parent_{NN}.pdf` / `Granted_document_TD_{NN}.pdf` via **Google Patents** (also patent_no only).
+
+`"initial"`, `"middle"`, `"index_of_claims"` are skipped because there are no USPTO docs to merge or a most-recent-FWCLM to fetch. Parents without a `patent_no` (rare CIP/CON cases — application abandoned without grant) are still skipped entirely.
+
+Default behavior is unchanged: without the flag, the early `No prosecution docs` skip path runs as before.
 
 ### `--disclaimers`
 
