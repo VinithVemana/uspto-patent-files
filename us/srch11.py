@@ -227,7 +227,7 @@ def render_claims_pdf(
         topMargin=0.8 * inch,
         bottomMargin=0.8 * inch,
         title=f"US{patent_number} — Granted Claims",
-        author="Dolcera Solr (srch11)",
+        author="",
     )
 
     styles = getSampleStyleSheet()
@@ -270,11 +270,11 @@ def render_claims_pdf(
     story: list = [
         Paragraph(f"US {_escape(patent_number)} &mdash; Granted Claims",
                   title_style),
-        Paragraph(
-            f"Grant date: {_escape(grant_date) if grant_date else 'N/A'} "
-            f"&nbsp;&middot;&nbsp; Source: Dolcera Solr (srch11)",
-            meta_style,
-        ),
+        # Paragraph(
+        #     f"Grant date: {_escape(grant_date) if grant_date else 'N/A'} "
+        #     f"&nbsp;&middot;&nbsp; Source: Dolcera Solr (srch11)",
+        #     meta_style,
+        # ),
     ]
 
     if statement:
