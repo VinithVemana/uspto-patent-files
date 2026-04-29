@@ -84,7 +84,7 @@ RUN FROM THE COMMAND LINE
                           index_of_claims are skipped (no USPTO docs to merge).
       --base-url URL      Base URL for download_url links (default: http://localhost:7901)
 
-      python bundles_api.py US12167405 --download  --continuations
+      python bundles_api.py US12167405 --download  --continuations --disclaimers --output-dir ./test
       python bundles_api.py 12141042 --download  --disclaimers
       python bundles_api.py US8332478B2 --download  --continuations --legacy-parents  # CIP/CON parents pre-2001
       python bundles_api.py US8332478B2 --download  --disclaimers --legacy-parents    # TD-cited patents pre-2001
@@ -326,7 +326,7 @@ if __name__ == "__main__":
                 _process_disclaimers(app_no, root, args.legacy_parents)
                 if args.disclaimers else []
             )
-            if cont_list or disq_list:
+            if args.continuations or args.disclaimers:
                 all_in_main = sorted(
                     f for f in os.listdir(main_dir) if f.endswith(".pdf")
                 ) if os.path.isdir(main_dir) else []
@@ -896,9 +896,10 @@ if __name__ == "__main__":
                 legacy_fallback = legacy_parents,
             )
 
-            # Skip unreachable / no-data parents from related.json so it
-            # tracks only folders that actually exist.
+            # Nothing produced — remove empty folder (avoid confusion) and skip.
             if not summary["downloaded"] and not summary["skipped"] and not summary["failures"]:
+                if os.path.isdir(parent_dir) and not os.listdir(parent_dir):
+                    os.rmdir(parent_dir)
                 continue
 
             all_in_parent = sorted(
