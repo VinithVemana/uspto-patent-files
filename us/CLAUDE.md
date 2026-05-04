@@ -13,7 +13,8 @@ CLI entry point is `bundles_api.py` at the project root.
 | `bundles.py` | `build_prosecution_bundles()`, `_build_three_bundles()`, `_doc_category()`, `_filter_docs()` |
 | `pdf.py` | `get_patent_pdf_url()`, `_merge_bundle_pdfs()`, `_merge_fwclm_pdf()` |
 | `manifest.py` | `_doc_fingerprint()`, `_load_manifest()`, `_save_manifest()`, `_needs_download()` |
-| `disclaimer.py` | OCR + parse Terminal Disclaimer (`DISQ`) decisions: `get_disq_decisions()`, `parse_disq_text()`, `_ocr_pdf_url()` (shells out to `pdftoppm` + `tesseract`) |
+| `disclaimer.py` | Terminal Disclaimer pipeline: matches DIST/DISQ + variants + any "Terminal Disclaimer" desc, downloads to `<main>/td_source/`, OCR (cached `.ocr.txt`), GPT-classify via `llm_disclaimer` (cached `.llm.json`), pair DIST→DISQ chronologically. Public: `get_terminal_disclaimer_decisions(app_no, save_dir=None)` (alias `get_disq_decisions`). |
+| `llm_disclaimer.py` | OpenAI agent (`gpt-4o-mini`, override via `OPENAI_TD_MODEL`). `classify_document(text)` → `{doc_type: filing\|review\|other, approved, patents, notes}`. Reads `OPENAPI_KEY` then `OPENAI_API_KEY`. Fail-closed: returns `doc_type=other` / `approved=None` when key/SDK missing. |
 | `pcs_api.py` | Granted-claims source (primary): Dolcera PCS proxy (`dev2.dolcera.net/pcs_api/api/proxy/service2`). Reuses `srch11.parse_claims` and `srch11.render_claims_pdf` for XML→PDF. Opt-in via `PCS_API_KEY` env var; when unset, gracefully skipped. |
 | `srch11.py` | Granted-claims source (fallback after pcs_api): queries Dolcera Solr (`srch11.dolcera.net:12080`), parses claim XML via lxml, renders to PDF via reportlab. Used for every `Granted_claims*.pdf` (main + TD + continuation) when pcs_api is unavailable, with USPTO merge as final fallback. |
 
@@ -79,11 +80,17 @@ Filename pattern (granted parent): `US{parent_patent_no}_{bundle_filename}.pdf`.
 
 ## Terminal Disclaimer Downloads (`--disclaimers`)
 
-`disclaimer.get_disq_decisions(app_no)` filters `_get_documents()` for `code == "DISQ"`, OCRs each PDF (`pdftoppm` -r 300 + `tesseract`), and returns `[{date, pdf_url, approved, patents}]`. `parse_disq_text()` detects approval via "TDs approved/disapproved" footer or `[x] APPROVED` checkbox, and extracts US patent numbers via the `\d{1,2},\d{3},\d{3}` regex (with bare-digit fallback).
+`disclaimer.get_terminal_disclaimer_decisions(app_no, save_dir)` returns `[{date, approved, patents, pdf_url, code, sources}]`, one entry per DISQ (or trailing unpaired DIST). Pipeline:
 
-`bundles_api._process_disclaimers(app_no, root, main_output_dir, legacy_parents)` collects approved cited patents (de-duped), **reverses** the list (descending), resolves each via `resolve_patent_to_application()`, and calls `_download_app_artifacts` into a sibling folder `US{td_patent_no}/` under `<root>`. Bundle types come from `config.DISCLAIMER_BUNDLES`. Each cited patent's folder has its own `manifest.json`.
+1. Filter `_get_documents()` to anything with code in `{DISQ, DIST}`, code starting with `DISQ.` or `DIST.` (covers `.E.FILE` variants), or description containing "Terminal Disclaimer".
+2. Download each PDF into `save_dir` (typically `<main>/td_source/`). Idempotent — skips when file exists.
+3. OCR via `pdftoppm` -r 300 + `tesseract`. OCR text cached as `<basename>.ocr.txt` next to the PDF.
+4. GPT classify via `llm_disclaimer.classify_document(text)` → `{doc_type, approved, patents, notes}`. Cached as `<basename>.llm.json`.
+5. Pair chronologically (`_pair_dist_disq`): each DISQ consumes all DIST patents collected since the previous DISQ. Unpaired DIST → emitted with `approved=None` (skipped by caller).
 
-Disapproved decisions are skipped. OCR binaries must be on PATH — install via `brew install poppler tesseract`.
+`bundles_api._process_disclaimers(app_no, root, main_output_dir, legacy_parents)` calls `get_terminal_disclaimer_decisions(app_no, save_dir=<main>/td_source)`, collects approved cited patents (de-duped), **reverses** the list (descending), resolves each via `resolve_patent_to_application()`, and calls `_download_app_artifacts` into a sibling folder `US{td_patent_no}/` under `<root>`. Bundle types come from `config.DISCLAIMER_BUNDLES`. Each cited patent's folder has its own `manifest.json`.
+
+Disapproved (or undetermined) decisions are skipped. OCR binaries (`pdftoppm`, `tesseract`) and an OpenAI key (`OPENAPI_KEY` or `OPENAI_API_KEY`) are required.
 
 ## related.json (main folder only)
 

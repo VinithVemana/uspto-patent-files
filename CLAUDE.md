@@ -112,7 +112,19 @@ Default behavior is unchanged: without the flag, the early `No prosecution docs`
 
 ### `--disclaimers`
 
-With `--download`, OCRs every Terminal Disclaimer review decision (`DISQ` doc code) on the input application. For each **approved** disclaimer, extracts the cited prior US patent numbers (descending order — reversed from collection order) and downloads the bundle types in `us/config.py::DISCLAIMER_BUNDLES` (default `["initial", "middle", "granted", "index_of_claims"]`) for every cited patent. Each cited patent gets its own sibling folder `US{td_patent_no}/` under `<root>` with its own `manifest.json`.
+With `--download`, sweeps every Terminal Disclaimer document on the file wrapper, classifies each with GPT, pairs filings (DIST) with their review decisions (DISQ), and downloads bundles for every cited prior patent of an **approved** disclaimer.
+
+**Document selection.** A doc is treated as a Terminal Disclaimer when **any** of these match:
+- `code` is `DISQ` or `DIST`
+- `code` starts with `DISQ.` or `DIST.` (covers `DIST.E.FILE` / `DISQ.E.FILE`)
+- description contains "Terminal Disclaimer" (case-insensitive — catches legacy / non-standard codes)
+
+**Pipeline (per main patent).**
+1. Every matching PDF is downloaded once into `<main_folder>/td_source/`.
+2. Each PDF is OCRed via `pdftoppm` + `tesseract`. OCR text is cached as `<basename>.ocr.txt`.
+3. Each OCR text is sent to `us/llm_disclaimer.py` (OpenAI `gpt-4o-mini`, override via `OPENAI_TD_MODEL`) which returns `{doc_type, approved, patents, notes}`. Result is cached as `<basename>.llm.json`.
+4. DIST filings and DISQ reviews are paired chronologically — each DISQ consumes all DIST filings that came in since the previous DISQ. The DISQ's `approved` flag governs whether the paired DIST patents are followed. Unpaired DIST (no later DISQ) is treated as pending (`approved=None`) and skipped.
+5. For each cited patent of an APPROVED disclaimer, bundles in `us/config.py::DISCLAIMER_BUNDLES` are fetched into a sibling folder `US{td_patent_no}/` under `<root>` with its own `manifest.json`.
 
 Bundle keys (same as continuations):
 - `"initial"`          → `US{td_patent_no}_Initial_claims.pdf`
@@ -123,13 +135,11 @@ Bundle keys (same as continuations):
 
 Order recorded in main patent's `related.json` under `disclaimers[]` (descending).
 
-DISQ forms are scanned PTOL forms (image-only PDFs), so this requires **OCR**:
-- `pdftoppm` (poppler) — converts PDF pages to PNG
-- `tesseract` — OCRs the PNGs
+**Requirements.**
+- `pdftoppm` (poppler) and `tesseract` on `PATH` — `brew install poppler tesseract` on macOS.
+- `OPENAPI_KEY` (or `OPENAI_API_KEY`) in env or `.env`. Without a key the LLM step returns `doc_type=other` / `approved=None` for every doc, which causes the disclaimer flow to skip everything (fail-closed by design).
 
-Both must be on `PATH` (`brew install poppler tesseract` on macOS). Implementation lives in `us/disclaimer.py`.
-
-Approval detection looks for "TDs approved" / "TDs disapproved" footer text first, then falls back to checkbox-style `[x] APPROVED`. Disapproved decisions are skipped.
+Implementation: `us/disclaimer.py` (downloader + OCR cache + DIST↔DISQ pairing) and `us/llm_disclaimer.py` (OpenAI agent + JSON parsing). Re-runs reuse cached PDFs, OCR text, and LLM JSON — zero network / LLM cost on clean re-runs.
 
 **EP CLI:**
 ```bash

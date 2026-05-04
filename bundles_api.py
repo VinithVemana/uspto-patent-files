@@ -70,12 +70,17 @@ RUN FROM THE COMMAND LINE
                           named US{parent_patent_no}/ (or app_{app_no}/ if not
                           granted). Order recorded in main folder's related.json.
                           Types per us/config.py CONTINUATION_BUNDLES.
-      --disclaimers       OCR every DISQ decision; for each approved Terminal
-                          Disclaimer download bundles for every cited prior
-                          patent. Each cited patent gets its own sibling folder
-                          under <root>. Order recorded in main folder's
-                          related.json (descending). Types per DISCLAIMER_BUNDLES.
-                          Requires pdftoppm + tesseract on PATH.
+      --disclaimers       Download every Terminal Disclaimer doc (DIST + DISQ
+                          + .E.FILE variants + any doc whose description
+                          contains "Terminal Disclaimer") into <main>/td_source/,
+                          OCR each, send to GPT for classification (DIST →
+                          patents, DISQ → approved/disapproved), then pair
+                          DIST→DISQ chronologically. For each cited patent of
+                          an APPROVED disclaimer, download bundles into a
+                          sibling folder under <root>. Order recorded in main
+                          folder's related.json (descending). Types per
+                          DISCLAIMER_BUNDLES. Requires pdftoppm + tesseract on
+                          PATH and OPENAPI_KEY (or OPENAI_API_KEY) in env / .env.
       --legacy-parents    For --continuations / --disclaimers parents that have
                           no USPTO file-wrapper docs (typically pre-2001 apps),
                           still attempt Granted_claims via srch11 and
@@ -123,7 +128,7 @@ from us.resolver import (
     _extract_patent_digits,
     _is_publication_number,
 )
-from us.disclaimer import get_disq_decisions
+from us.disclaimer import get_terminal_disclaimer_decisions
 from us.bundles import (
     build_prosecution_bundles,
     _build_three_bundles,
@@ -356,7 +361,7 @@ if __name__ == "__main__":
                 if args.continuations else []
             )
             disq_list = (
-                _process_disclaimers(app_no, root, args.legacy_parents)
+                _process_disclaimers(app_no, root, main_dir, args.legacy_parents)
                 if args.disclaimers else []
             )
             if args.continuations or args.disclaimers:
@@ -957,12 +962,17 @@ if __name__ == "__main__":
     def _process_disclaimers(
         app_no: str,
         root: str,
+        main_output_dir: str,
         legacy_parents: bool = False,
     ) -> list:
         """
-        For each APPROVED Terminal Disclaimer (DISQ) on ``app_no``, download
+        For each APPROVED Terminal Disclaimer on ``app_no``, download
         bundle types in ``DISCLAIMER_BUNDLES`` for every cited prior patent
         into a sibling folder under ``root``.
+
+        Source DIST/DISQ PDFs (and their OCR + LLM caches) are persisted under
+        ``<main_output_dir>/td_source/`` so the GPT classification is auditable
+        and re-runs incur zero LLM cost.
 
         Each cited patent gets its own folder + manifest:
           <root>/US{td_patent_no}/
@@ -971,14 +981,17 @@ if __name__ == "__main__":
         across DISQ decisions. Returns an ordered list of related-entry dicts
         to be persisted in the main folder's ``related.json``.
         """
+        td_source_dir = os.path.join(main_output_dir, "td_source")
         try:
-            decisions = get_disq_decisions(app_no)
+            decisions = get_terminal_disclaimer_decisions(
+                app_no, save_dir=td_source_dir,
+            )
         except Exception as exc:
-            print(f"  DISQ lookup failed: {exc}", file=sys.stderr)
+            print(f"  Terminal Disclaimer lookup failed: {exc}", file=sys.stderr)
             return []
 
         if not decisions:
-            print("  No DISQ documents found.", file=sys.stderr)
+            print("  No Terminal Disclaimer documents found.", file=sys.stderr)
             return []
 
         # Collect approved cited patents (de-dup, preserve order across DISQs).
@@ -1132,12 +1145,18 @@ Examples:
                              "its own sibling folder under <root>. Order (newest filing date "
                              "first) recorded in main folder's related.json.")
     parser.add_argument("--disclaimers",      action="store_true",
-                        help="Also OCR every Terminal Disclaimer (DISQ) decision; for each "
-                             "approved disclaimer download bundles for every cited prior "
-                             "patent (types in us/config.py DISCLAIMER_BUNDLES). Each cited "
-                             "patent gets its own sibling folder under <root>. Order "
-                             "(descending) recorded in main folder's related.json. "
-                             "Requires pdftoppm and tesseract on PATH.")
+                        help="Download every Terminal Disclaimer document (DIST + DISQ + "
+                             "their .E.FILE variants + anything with 'Terminal Disclaimer' "
+                             "in the description) into <main>/td_source/, OCR each PDF, then "
+                             "send the text to GPT (us/llm_disclaimer.py) to classify the "
+                             "doc and extract approved/disapproved + cited patents. "
+                             "DIST filings and DISQ decisions are paired chronologically — "
+                             "DIST patents are kept only when the following DISQ is "
+                             "APPROVED. For each approved cited patent, bundles in "
+                             "DISCLAIMER_BUNDLES are downloaded into a sibling folder "
+                             "under <root>. Order (descending) recorded in main folder's "
+                             "related.json. Requires pdftoppm + tesseract on PATH and "
+                             "OPENAPI_KEY (or OPENAI_API_KEY) in the environment / .env.")
     parser.add_argument("--legacy-parents",   action="store_true",
                         help="For --continuations / --disclaimers parents that have no "
                              "USPTO file-wrapper docs (typically pre-2001 apps), still "
