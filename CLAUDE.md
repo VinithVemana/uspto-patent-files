@@ -156,21 +156,28 @@ lxml, reportlab
 
 No `requirements.txt` — install manually.
 
-## Granted-Claims Source: srch11 → USPTO fallback
+## Granted-Claims Source: pcs_api → srch11 → USPTO fallback
 
-Every `Granted_claims*.pdf` produced by `bundles_api.py` — main bundle, every `_TD_NN` (`--disclaimers`), and every `_parent_NN` (`--continuations`) — prefers Dolcera Solr (`srch11.dolcera.net:12080/solr/alexandria-101123`) over the USPTO bundle merge.
+Every `Granted_claims*.pdf` produced by `bundles_api.py` — main bundle, every `_TD_NN` (`--disclaimers`), and every `_parent_NN` (`--continuations`) — picks a source in this order:
 
-Solr query: `pn:"<patent_no>" AND publication_type:"Granted"` with `fl=clm,ucid&rows=1`. Always take `clm[0]` from the response — the `clm` field is a list and the first element is the granted-publication claim XML; later elements are other publication variants and are ignored.
+1. **pcs_api** (`us/pcs_api.py`) — Dolcera PCS proxy (`dev2.dolcera.net/pcs_api/api/proxy/service2`). Primary source. Requires `PCS_API_KEY` in the environment; when unset, this step is silently skipped. Query: `pn:"US-{patent_no}-B2" OR pn:"US-{patent_no}-B1"` with `rows=2`, `fields=["clm"]`. First doc's `clm[0]` is the claim XML.
+2. **srch11** (`us/srch11.py`) — Dolcera Solr (`srch11.dolcera.net:12080/solr/alexandria-101123`). Fallback when pcs_api is unreachable / no match / parse error. Query: `pn:"<patent_no>" AND publication_type:"Granted" AND pnctry:"US"` with `fl=clm,ucid&rows=1`. Always takes `clm[0]`.
+3. **USPTO** (`_merge_bundle_pdfs`) — last resort. Merges the latest CLM doc on the file wrapper.
 
-Why prefer Solr: it mirrors the issued grant verbatim. The latest USPTO `CLM` document on the file wrapper can include examiner amendments not present in the published patent. For old patents (pre-AIA, pre-2010s), the granted bundle on USPTO is often empty, so Solr is the **only** source — without it, the granted-claims PDF would not exist at all.
+Both Dolcera sources mirror the issued grant verbatim. The latest USPTO `CLM` document on the file wrapper can include examiner amendments not present in the published patent. For old patents (pre-AIA, pre-2010s), the granted bundle on USPTO is often empty, so the Dolcera sources are the **only** way to produce a granted-claims PDF.
 
-Fallback triggers: srch11 TCP unreachable (2s probe, cached per process), Solr `numFound=0`, malformed XML, parse yields 0 claims, or PDF render error. On fallback, `_merge_bundle_pdfs` runs against the USPTO bundle if it has documents; otherwise the artifact is recorded as a clean `failures` entry in the manifest.
+Fallback triggers (each step): TCP probe fails (2s, cached per process), backend returns no docs, malformed XML, parse yields 0 claims, or PDF render error. If all three fail, the artifact is recorded as a clean `failures` entry in the manifest.
 
-Manifest tagging: when the file came from Solr, the artifact fingerprint is `srch11:{patent_number}` (vs. the 16-hex USPTO doc-fingerprint). Source swaps trigger a re-fetch on the next run automatically.
+Manifest tagging: artifact fingerprints are source-tagged so source swaps trigger a re-fetch on the next run:
+- `pcs:{patent_number}`    when from pcs_api
+- `srch11:{patent_number}` when from srch11
+- 16-hex doc fingerprint    when from USPTO merge
 
-Logging: every run prints the TCP-probe result, the Solr `numFound`, the `clm` list size, the parsed claim count, and the resolved source decision (`srch11` vs `uspto`) to stderr — so debugging "why is this PDF missing / why is this from USPTO" is a single grep away.
+Both Dolcera modules reuse `srch11.parse_claims` and `srch11.render_claims_pdf` for XML→PDF, so claim layout is identical regardless of source.
 
-Implementation: `us/srch11.py` (`is_reachable`, `fetch_claims_xml`, `parse_claims`, `render_claims_pdf`, `build_granted_claims_pdf`). Top-level helpers `_granted_claims_planned_fingerprint` and `_build_granted_claims_pdf` in `bundles_api.py` are reused by `_download_three_smart`, `_process_disclaimers`, and `_process_continuations`.
+Logging: every run prints TCP-probe results, `numFound` / docs returned, the `clm` list size, parsed claim count, and the resolved source decision (`pcs` / `srch11` / `uspto`) to stderr — so debugging "why is this PDF missing / why is this from USPTO" is a single grep away.
+
+Implementation: top-level helpers `_granted_claims_planned_fingerprint` and `_build_granted_claims_pdf` in `bundles_api.py` are reused by the main 3-bundle flow, `_process_disclaimers`, and `_process_continuations`. Configuration env vars: `PCS_API_KEY`, `PCS_API_BASE_URL`, `PCS_API_PORT`.
 
 ## Architecture
 

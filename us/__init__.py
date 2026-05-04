@@ -8,17 +8,19 @@ Public surface (used by bundles_api.py CLI and bundles_server.py):
     bundles._doc_category(code, bundle_type) / _filter_docs(...)
     pdf._merge_bundle_pdfs(bundle, ...) / _merge_fwclm_pdf(bundles) / get_patent_pdf_url(patent_no)
     manifest._doc_fingerprint(docs) / _load_manifest / _save_manifest / _needs_download
+    pcs_api.is_reachable() / build_granted_claims_pdf(patent_no, grant_date)
     srch11.is_reachable() / build_granted_claims_pdf(patent_no, grant_date)
     config — constants: HEADERS, GOOGLE_PATENTS_HEADERS, OA_TRIGGER_CODES, etc.
 """
 
-from . import bundles, client, config, manifest, pdf, resolver, srch11
+from . import bundles, client, config, manifest, pcs_api, pdf, resolver, srch11
 
 __all__ = [
     "bundles",
     "client",
     "config",
     "manifest",
+    "pcs_api",
     "pdf",
     "resolver",
     "srch11",

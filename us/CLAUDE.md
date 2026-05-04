@@ -14,7 +14,8 @@ CLI entry point is `bundles_api.py` at the project root.
 | `pdf.py` | `get_patent_pdf_url()`, `_merge_bundle_pdfs()`, `_merge_fwclm_pdf()` |
 | `manifest.py` | `_doc_fingerprint()`, `_load_manifest()`, `_save_manifest()`, `_needs_download()` |
 | `disclaimer.py` | OCR + parse Terminal Disclaimer (`DISQ`) decisions: `get_disq_decisions()`, `parse_disq_text()`, `_ocr_pdf_url()` (shells out to `pdftoppm` + `tesseract`) |
-| `srch11.py` | Granted-claims source: queries Dolcera Solr (`srch11.dolcera.net:12080`), parses claim XML via lxml, renders to PDF via reportlab. Used as primary source for every `Granted_claims*.pdf` (main + TD + continuation) with USPTO merge as fallback. |
+| `pcs_api.py` | Granted-claims source (primary): Dolcera PCS proxy (`dev2.dolcera.net/pcs_api/api/proxy/service2`). Reuses `srch11.parse_claims` and `srch11.render_claims_pdf` for XML→PDF. Opt-in via `PCS_API_KEY` env var; when unset, gracefully skipped. |
+| `srch11.py` | Granted-claims source (fallback after pcs_api): queries Dolcera Solr (`srch11.dolcera.net:12080`), parses claim XML via lxml, renders to PDF via reportlab. Used for every `Granted_claims*.pdf` (main + TD + continuation) when pcs_api is unavailable, with USPTO merge as final fallback. |
 
 ## Data Flow
 

@@ -84,7 +84,7 @@ RUN FROM THE COMMAND LINE
                           index_of_claims are skipped (no USPTO docs to merge).
       --base-url URL      Base URL for download_url links (default: http://localhost:7901)
 
-      python bundles_api.py US12167405 --download  --continuations --disclaimers --output-dir ./test
+      python bundles_api.py US8589324 --download  --continuations --disclaimers --output-dir ./test
       python bundles_api.py 12141042 --download  --disclaimers
       python bundles_api.py US8332478B2 --download  --continuations --legacy-parents  # CIP/CON parents pre-2001
       python bundles_api.py US8332478B2 --download  --disclaimers --legacy-parents    # TD-cited patents pre-2001
@@ -92,13 +92,20 @@ RUN FROM THE COMMAND LINE
 GRANTED CLAIMS SOURCE
 ---------------------
 Every Granted_claims*.pdf — main bundle plus every continuation / TD sibling —
-is built from Dolcera Solr
-(`srch11.dolcera.net:12080`, collection `alexandria-101123`) when reachable.
-Solr mirrors the issued grant verbatim, avoiding examiner amendments that
-may appear in the latest USPTO CLM document, and works for legacy patents
-whose USPTO granted bundle is empty. Falls back to the USPTO bundle merge
-automatically when srch11 is unreachable, has no match, or returns
-malformed claims. See us/srch11.py.
+is built from one of three sources, in order of preference:
+
+  1. Dolcera PCS proxy  (`dev2.dolcera.net/pcs_api/...`, see us/pcs_api.py)
+  2. Dolcera Solr       (`srch11.dolcera.net:12080/solr/alexandria-101123`,
+                         see us/srch11.py)
+  3. USPTO bundle merge (latest CLM doc on the file wrapper)
+
+Both Dolcera sources mirror the issued grant verbatim, avoiding examiner
+amendments that may appear in the latest USPTO CLM document, and work for
+legacy patents whose USPTO granted bundle is empty. The pcs proxy is
+preferred when ``PCS_API_KEY`` is set in the environment; otherwise that
+step is skipped and srch11 takes over. Falls through to USPTO automatically
+when both Dolcera sources are unreachable, have no match, or return
+malformed claims.
 
 WEB SERVER
 ----------
@@ -124,7 +131,7 @@ from us.bundles import (
     _filter_docs,
 )
 from us.pdf import get_patent_pdf_url, _merge_bundle_pdfs, _merge_fwclm_pdf
-from us import srch11
+from us import pcs_api, srch11
 from us.manifest import (
     MANIFEST_FILE,
     _doc_fingerprint,
@@ -151,7 +158,11 @@ if __name__ == "__main__":
         Predict which source `_build_granted_claims_pdf` will use, so the
         caller's up-to-date check uses the matching fingerprint format and
         re-runs detect source swaps.
+
+        Source preference: pcs_api → srch11 → USPTO doc fingerprint.
         """
+        if patent_no and pcs_api.is_reachable():
+            return f"pcs:{patent_no}"
         if patent_no and srch11.is_reachable():
             return f"srch11:{patent_no}"
         return _doc_fingerprint(b["documents"]) if b["documents"] else ""
@@ -162,17 +173,39 @@ if __name__ == "__main__":
     ) -> tuple[bool, str, str, str]:
         """
         Source policy for any Granted_claims PDF (main / TD / continuation):
-          1. srch11 (Dolcera Solr) when reachable and patent_no is known
-          2. USPTO `_merge_bundle_pdfs` when bundle has documents
-          3. failure if neither is available
+          1. pcs_api (Dolcera PCS proxy) when reachable and patent_no is known
+          2. srch11  (Dolcera Solr)      when reachable and patent_no is known
+          3. USPTO `_merge_bundle_pdfs`  when bundle has documents
+          4. failure if none available
 
         Returns ``(ok, source, fingerprint, reason)``. ``source`` is one of
-        ``"srch11"`` / ``"uspto"``; ``fingerprint`` matches the source so
-        re-runs detect swaps; ``reason`` explains failures (or "ok").
+        ``"pcs"`` / ``"srch11"`` / ``"uspto"``; ``fingerprint`` matches
+        the source so re-runs detect swaps; ``reason`` explains failures
+        (or "ok").
         """
         print(f"  [{log_label}] resolving source: "
               f"patent_no={patent_no!r}, docs_count={len(b['documents'])}",
               file=sys.stderr)
+
+        if patent_no and pcs_api.is_reachable():
+            buf, pcs_reason = pcs_api.build_granted_claims_pdf(
+                patent_no, grant_date
+            )
+            if buf is not None:
+                try:
+                    with open(filepath, "wb") as fh:
+                        fh.write(buf.getvalue())
+                    size_kb = os.path.getsize(filepath) // 1024
+                    print(f"  [{log_label}] -> Saved from pcs_api ({size_kb:,} KB)",
+                          file=sys.stderr)
+                    return True, "pcs", f"pcs:{patent_no}", "ok"
+                except OSError as exc:
+                    print(f"  [{log_label}] pcs_api write failed: {exc} "
+                          f"— falling back to srch11", file=sys.stderr)
+            else:
+                print(f"  [{log_label}] pcs_api path unavailable "
+                      f"({pcs_reason}) — falling back to srch11",
+                      file=sys.stderr)
 
         if patent_no and srch11.is_reachable():
             buf, srch_reason = srch11.build_granted_claims_pdf(
@@ -209,7 +242,7 @@ if __name__ == "__main__":
             except (ValueError, OSError) as exc:
                 return False, "", "", f"USPTO merge failed: {exc}"
 
-        return False, "", "", "no source available (srch11 unavailable, USPTO bundle empty)"
+        return False, "", "", "no source available (pcs_api/srch11 unavailable, USPTO bundle empty)"
 
     # ------------------------------------------------------------------
     # Folder + filename naming helpers
