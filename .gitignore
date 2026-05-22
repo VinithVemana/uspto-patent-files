@@ -15,6 +15,7 @@ __pycache__/
 
 # EP downloaded patent PDF artifacts (EP{digits} directories)
 EP[0-9]*/
+ep_patents*/
 
 # BJF run artifacts (logs + xlsx results)
 bjf/bjf_fetch.log
