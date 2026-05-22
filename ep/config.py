@@ -213,7 +213,29 @@ EXTRA_TYPES = {
     "reply to invitation to file a copy of priority",
 }
 
-
+# ---------------------------------------------------------------------------
+# MIDDLE-BUNDLE ALLOWLIST — EPO doc-type substrings allowed into REM-CTNF-NOA.
+# If non-empty, ONLY docs whose `doc_type` contains one of these substrings
+# (case-insensitive, after _norm()) go into the middle/prosecution bundle.
+# If empty (default), falls back to legacy exclusion behaviour: everything
+# not already in initial/granted/patent layers.
+# Substring matching mirrors OA_TRIGGER_TYPES etc.
+# ---------------------------------------------------------------------------
+MIDDLE_BUNDLE_TYPES: set[str] = {
+    "Amended claims filed after receipt of (European) search report",
+    "Supplementary european search report",
+    "Extended european search report",
+    "European search opinion",
+    "Amended claims with annotations",
+    "Communication from the examining division",
+    "Annex to the communication",
+    "summons to attend oral proceedings",
+    "Reply to communication from the examining division",
+    "Written submission in preparation to/during oral proceedings",
+    "Result of consultation by telephone/in person",
+    "Minutes of the oral proceedings",
+    "Consultation by telephone/in person", 
+}
 # ===========================================================================
 # Classification logic — do not edit below unless extending tiers
 # ===========================================================================
@@ -263,6 +285,11 @@ def classify(doc_type: str, *, bundle_type: str = "round") -> str:
     # Everything else: extra (supporting admin)
     return "extra"
 
+def is_middle_allowed(doc_type: str) -> bool:
+    """True if doc_type matches the middle-bundle allowlist. Empty set = allow all."""
+    if not MIDDLE_BUNDLE_TYPES:
+        return True
+    return _any_substring(_norm(doc_type), MIDDLE_BUNDLE_TYPES)
 
 def category_label(tier: str) -> str:
     """Human-readable suffix used in --text listings."""

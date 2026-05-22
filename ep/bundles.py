@@ -248,12 +248,19 @@ def build_four_bundles(documents: list[dict]) -> list[dict]:
 
     # Layer 1: everything not in the other three layers
     skip        = {id(d) for d in initial_docs + granted_docs + patent_docs}
-    middle_docs = [d for d in docs if id(d) not in skip]
+    middle_docs = [
+        d for d in docs
+        if id(d) not in skip
+        and config.is_middle_allowed(d["doc_type"])
+        ]
 
     present_codes = {d["code"] for d in middle_docs}
     name_parts    = [c for c in _MIDDLE_CODE_ORDER if c in present_codes]
     prosecution_name = "-".join(name_parts) if name_parts else "Prosecution"
-
+    middle_annotated = _annotate(middle_docs, "round")
+    if config.MIDDLE_BUNDLE_TYPES:
+        for d in middle_annotated:
+            d["category"] = "default"
     return [
         {
             "label":     "Initial Claims",
@@ -265,7 +272,7 @@ def build_four_bundles(documents: list[dict]) -> list[dict]:
             "label":     prosecution_name,
             "filename":  "REM-CTNF-NOA",
             "type":      "round",
-            "documents": _annotate(middle_docs, "round"),
+            "documents": middle_annotated,
         },
         {
             "label":     "Granted Claims",
