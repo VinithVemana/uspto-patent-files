@@ -475,7 +475,8 @@ def _process_one_ep_patent(
     if args.download:
         os.makedirs(output_dir, exist_ok=True)
         manifest = _load_manifest(output_dir)
-        state, failures = _download_bundles(four, session, app_no, output_dir, manifest)
+        to_download = [b for b in four if b["type"] in ep_config.SOURCE_BUNDLES]
+        state, failures = _download_bundles(to_download, session, app_no, output_dir, manifest)
         _finalize_manifest(output_dir, app_no, state, failures)
 
     return True

@@ -214,6 +214,23 @@ EXTRA_TYPES = {
 }
 
 # ---------------------------------------------------------------------------
+# Source patent download settings  (the input EP patent in --download mode)
+# ---------------------------------------------------------------------------
+# Bundle types to download for the input EP patent. Default-mode build_four_bundles()
+# emits 4 bundle types — include the ones you want fetched:
+#   "initial"          →  Initial_claims.pdf
+#   "round"            →  REM-CTNF-NOA.pdf  (prosecution)
+#   "granted"          →  Granted_claims.pdf
+#   "patent_document"  →  Granted_document.pdf  (Text intended for grant; slow —
+#                         EPO Register serves it one page at a time behind
+#                         Cloudflare, so a 50-page doc takes minutes)
+#
+# Bundles excluded here are still shown in the JSON/--text listing but skipped
+# on download. The --separate-bundles mode is not affected by this knob.
+SOURCE_BUNDLES = ["initial", "round", "granted"]  # patent_document
+
+
+# ---------------------------------------------------------------------------
 # MIDDLE-BUNDLE ALLOWLIST — EPO doc-type substrings allowed into REM-CTNF-NOA.
 # If non-empty, ONLY docs whose `doc_type` contains one of these substrings
 # (case-insensitive, after _norm()) go into the middle/prosecution bundle.
