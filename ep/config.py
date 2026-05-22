@@ -222,19 +222,19 @@ EXTRA_TYPES = {
 # Substring matching mirrors OA_TRIGGER_TYPES etc.
 # ---------------------------------------------------------------------------
 MIDDLE_BUNDLE_TYPES: set[str] = {
-    "Amended claims filed after receipt of (European) search report",
-    "Supplementary european search report",
-    "Extended european search report",
-    "European search opinion",
-    "Amended claims with annotations",
-    "Communication from the examining division",
-    "Annex to the communication",
+    "amended claims filed after receipt of (european) search report",
+    "supplementary european search report",
+    "extended european search report",
+    "european search opinion",
+    "amended claims with annotations",
+    "communication from the examining division",
+    "annex to the communication",
     "summons to attend oral proceedings",
-    "Reply to communication from the examining division",
-    "Written submission in preparation to/during oral proceedings",
-    "Result of consultation by telephone/in person",
-    "Minutes of the oral proceedings",
-    "Consultation by telephone/in person", 
+    "reply to communication from the examining division",
+    "written submission in preparation to/during oral proceedings",
+    "result of consultation by telephone/in person",
+    "minutes of the oral proceedings",
+    "consultation by telephone/in person",
 }
 # ===========================================================================
 # Classification logic — do not edit below unless extending tiers
