@@ -70,6 +70,7 @@ from ep import bundles as ep_bundles
 from ep import config as ep_config
 from ep import ops_client, pdf as ep_pdf, resolver
 from ep.register_client import RegisterSession
+from us import pcs_api
 
 
 # ===========================================================================
@@ -212,9 +213,92 @@ def _cmd_list_docs(meta: dict, documents: list[dict]) -> None:
 # Download orchestration (for --download)
 # ===========================================================================
 
+def _granted_claims_planned_fingerprint(
+    b: dict, pub_no: str | None, kind_code: str | None,
+) -> str:
+    """
+    Predict the fingerprint `_build_granted_claims_pdf` will assign, so
+    `_needs_download` can detect source swaps (PCS ↔ EPO) and force a
+    re-fetch when the source changes. Mirrors the US-side helper
+    `bundles_api._granted_claims_planned_fingerprint`.
+    """
+    if pub_no and kind_code and pcs_api.is_reachable():
+        return f"pcs:EP-{pub_no}-{kind_code}"
+    return ep_pdf.doc_fingerprint(b["documents"])
+
+
+def _build_granted_claims_pdf(
+    b: dict,
+    pub_no: str | None, kind_code: str | None, grant_date: str | None,
+    session: RegisterSession, app_no: str,
+    filepath: str,
+    log_label: str = "Granted_claims",
+) -> tuple[bool, str, str, str]:
+    """
+    PCS-first granted-claims builder with EPO Register merge fallback.
+
+    Returns ``(ok, source, fingerprint, reason)``:
+      source      ∈ {"pcs", "epo", ""}
+      fingerprint = "pcs:EP-{pub_no}-{kind_code}" / 16-hex doc fingerprint / ""
+      reason      = "ok" on success, error string on failure
+    """
+    # Step 1 — try PCS
+    if pub_no and kind_code and pcs_api.is_reachable():
+        print(f"  [{log_label}] PCS reachable, querying "
+              f'pn:"EP-{pub_no}-{kind_code}"', file=sys.stderr)
+        buf, reason = pcs_api.build_granted_claims_pdf_ep(pub_no, kind_code, grant_date)
+        if buf is not None:
+            try:
+                with open(filepath, "wb") as fh:
+                    fh.write(buf.getvalue())
+                size_kb = os.path.getsize(filepath) // 1024
+                print(f"  [{log_label}] -> Saved from pcs_api ({size_kb:,} KB)",
+                      file=sys.stderr)
+                return True, "pcs", f"pcs:EP-{pub_no}-{kind_code}", "ok"
+            except OSError as exc:
+                print(f"  [{log_label}] pcs_api write failed: {exc} — "
+                      f"falling back to EPO merge", file=sys.stderr)
+        else:
+            print(f"  [{log_label}] pcs_api: {reason} — falling back to EPO merge",
+                  file=sys.stderr)
+    elif not (pub_no and kind_code):
+        print(f"  [{log_label}] missing pub_no/kind_code — using EPO merge directly",
+              file=sys.stderr)
+
+    # Step 2 — EPO Register merge fallback
+    if not b["documents"]:
+        return False, "", "", "no docs in granted bundle and PCS unavailable"
+
+    bar = tqdm(total=len(b["documents"]), desc=os.path.basename(filepath),
+               file=sys.stderr, leave=False)
+
+    def cb(doc, _bar=bar):
+        _bar.set_postfix_str(f"{doc.get('code','?')} {doc['doc_type'][:40]}")
+        _bar.update(1)
+
+    try:
+        merged = ep_pdf.merge_bundle_pdfs(
+            session, b, app_no,
+            show_extra=False, show_intclaim=False,
+            progress_cb=cb,
+        )
+        bar.close()
+        with open(filepath, "wb") as fh:
+            fh.write(merged.getvalue())
+        size_kb = os.path.getsize(filepath) // 1024
+        print(f"  [{log_label}] -> Saved from EPO Register merge ({size_kb:,} KB)",
+              file=sys.stderr)
+        return True, "epo", ep_pdf.doc_fingerprint(b["documents"]), "ok"
+    except Exception as exc:
+        bar.close()
+        return False, "", "", str(exc)
+
+
 def _download_bundles(
     bundles: list[dict], session: RegisterSession, app_no: str, output_dir: str,
     manifest: dict,
+    pub_no: str | None = None, kind_code: str | None = None,
+    grant_date: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """Download the 4-bundle collapse. Returns (artifacts_state, failures)."""
     state: dict = {}
@@ -224,14 +308,36 @@ def _download_bundles(
         if not b["documents"]:
             continue
         filename = f"{b['filename']}.pdf"
-        fp       = ep_pdf.doc_fingerprint(b["documents"])
         key      = f"bundle_{b['filename']}"
+        filepath = os.path.join(output_dir, filename)
+
+        if b["type"] == "granted":
+            fp = _granted_claims_planned_fingerprint(b, pub_no, kind_code)
+        else:
+            fp = ep_pdf.doc_fingerprint(b["documents"])
+
         needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
         if not needed:
             state[key] = {"filename": filename, "fingerprint": fp, "needed": False}
             print(f"  [{filename}] up-to-date — skipped", file=sys.stderr)
             continue
 
+        # Granted bundle: PCS-first, EPO-fallback path.
+        if b["type"] == "granted":
+            print(f"  [{filename}] {reason} — building (PCS first, EPO fallback)",
+                  file=sys.stderr)
+            ok, source, fp_actual, fail_reason = _build_granted_claims_pdf(
+                b, pub_no, kind_code, grant_date, session, app_no, filepath,
+                log_label=filename,
+            )
+            if ok:
+                state[key] = {"filename": filename, "fingerprint": fp_actual, "needed": True}
+            else:
+                print(f"    -> Failed: {fail_reason}", file=sys.stderr)
+                failures.append({"key": key, "filename": filename, "reason": fail_reason})
+            continue
+
+        # Other bundles: existing EPO Register page-by-page merge.
         print(f"  [{filename}] {reason} — downloading {len(b['documents'])} docs", file=sys.stderr)
         bar = tqdm(total=len(b["documents"]), desc=filename, file=sys.stderr, leave=False)
 
@@ -246,7 +352,6 @@ def _download_bundles(
                 progress_cb=cb,
             )
             bar.close()
-            filepath = os.path.join(output_dir, filename)
             with open(filepath, "wb") as fh:
                 fh.write(merged.getvalue())
             size_kb = os.path.getsize(filepath) // 1024
@@ -476,7 +581,12 @@ def _process_one_ep_patent(
         os.makedirs(output_dir, exist_ok=True)
         manifest = _load_manifest(output_dir)
         to_download = [b for b in four if b["type"] in ep_config.SOURCE_BUNDLES]
-        state, failures = _download_bundles(to_download, session, app_no, output_dir, manifest)
+        state, failures = _download_bundles(
+            to_download, session, app_no, output_dir, manifest,
+            pub_no=meta.get("publication_number"),
+            kind_code=meta.get("kind_code"),
+            grant_date=meta.get("grant_date"),
+        )
         _finalize_manifest(output_dir, app_no, state, failures)
 
     return True

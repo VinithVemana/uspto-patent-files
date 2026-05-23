@@ -2,6 +2,8 @@
 us/resolver.py — USPTO input normalization and application-number resolution
 """
 
+from __future__ import annotations
+
 import re
 
 from .config import BASE_API

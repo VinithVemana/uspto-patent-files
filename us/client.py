@@ -2,6 +2,8 @@
 us/client.py — USPTO API HTTP helpers and data parsers
 """
 
+from __future__ import annotations
+
 import time
 
 import requests

@@ -2,6 +2,8 @@
 us/bundles.py — Prosecution bundle builder and 3-bundle collapse
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 
 from .config import (

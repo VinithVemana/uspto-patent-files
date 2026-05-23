@@ -2,6 +2,8 @@
 us/pdf.py — USPTO PDF fetch helpers (patent PDF + bundle merging)
 """
 
+from __future__ import annotations
+
 import io
 import re
 import sys

@@ -27,6 +27,8 @@ PDF layout
 - Page footer: "USxxxxxxx · Page N" right-aligned in grey.
 """
 
+from __future__ import annotations
+
 import io
 import re
 import socket
@@ -123,6 +125,8 @@ def _walk_claim_text(elem, depth: int):
     if elem.text:
         lead_parts.append(elem.text)
     for child in elem:
+        if not isinstance(child.tag, str):
+            continue  # skip XML comments / processing instructions (EP claim XML has these)
         if child.tag == "claim-text":
             continue
         for t in child.itertext():
@@ -134,6 +138,8 @@ def _walk_claim_text(elem, depth: int):
         yield (depth, lead)
 
     for child in elem:
+        if not isinstance(child.tag, str):
+            continue  # skip comments / PIs
         if child.tag != "claim-text":
             continue
         yield from _walk_claim_text(child, depth + 1)

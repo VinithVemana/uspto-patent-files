@@ -2,6 +2,8 @@
 us/manifest.py — Download manifest: skip unchanged / re-attempt missing artifacts on re-runs
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
