@@ -12,12 +12,13 @@ Public surface (used by bundles_api_ep.py CLI and bundles_server.py):
     config — user-editable document classification (see module docstring)
 """
 
-from . import auth, bundles, config, ops_client, pdf, register_client, resolver
+from . import auth, bundles, config, kopd_client, ops_client, pdf, register_client, resolver
 
 __all__ = [
     "auth",
     "bundles",
     "config",
+    "kopd_client",
     "ops_client",
     "pdf",
     "register_client",

@@ -68,7 +68,7 @@ from tqdm import tqdm
 
 from ep import bundles as ep_bundles
 from ep import config as ep_config
-from ep import ops_client, pdf as ep_pdf, resolver
+from ep import kopd_client, ops_client, pdf as ep_pdf, resolver
 from ep.register_client import RegisterSession
 from us import pcs_api
 
@@ -78,6 +78,38 @@ from us import pcs_api
 # ===========================================================================
 
 MANIFEST_FILE = "manifest.json"
+
+
+def _fetch_doclist(app_no: str, session: RegisterSession) -> tuple[list[dict], str]:
+    """
+    Fetch the prosecution doc list from KOPD first; fall back to EPO Register.
+
+    Tags every returned doc dict with ``_source: "kopd"`` or ``_source: "epo"``
+    so the downloader knows which backend to use.
+
+    Returns ``(documents, source_label)``. Raises if both sources fail.
+    """
+    if kopd_client.is_reachable():
+        try:
+            docs = kopd_client.list_documents(app_no)
+            if docs:
+                for d in docs:
+                    d["_source"] = "kopd"
+                return docs, "kopd"
+            print("  [kopd] returned empty list — falling back to EPO Register",
+                  file=sys.stderr)
+        except RuntimeError as exc:
+            print(f"  [kopd] soft failure ({exc}) — falling back to EPO Register",
+                  file=sys.stderr)
+        except Exception as exc:
+            print(f"  [kopd] error ({exc}) — falling back to EPO Register",
+                  file=sys.stderr)
+
+    print("Fetching document list from EPO Register ...", file=sys.stderr)
+    docs = session.list_documents(f"EP{app_no}")
+    for d in docs:
+        d["_source"] = "epo"
+    return docs, "epo"
 
 
 def _fetch_everything(input_number: str) -> tuple[str, str | None, dict, list[dict], RegisterSession]:
@@ -117,11 +149,12 @@ def _fetch_everything(input_number: str) -> tuple[str, str | None, dict, list[di
     # Ensure app_number is populated (our truth is what the resolver returned)
     meta["application_number"] = app_no
 
-    # Scrape the register for the actual document list
-    print("Fetching document list from EPO Register ...", file=sys.stderr)
+    # Doclist: KOPD primary, EPO Register fallback. Each doc dict is tagged
+    # with `_source` so the downloader picks the right backend per doc.
     session = RegisterSession()
-    documents = session.list_documents(f"EP{app_no}")
-    print(f"Found {len(documents)} documents.", file=sys.stderr)
+    documents, doc_source = _fetch_doclist(app_no, session)
+    print(f"Found {len(documents)} documents (source: {doc_source}).",
+          file=sys.stderr)
 
     return app_no, pub_no, meta, documents, session
 
@@ -213,18 +246,30 @@ def _cmd_list_docs(meta: dict, documents: list[dict]) -> None:
 # Download orchestration (for --download)
 # ===========================================================================
 
+def _bundle_planned_fingerprint(b: dict) -> str:
+    """
+    Tag a non-granted bundle's fingerprint with its doclist source so source
+    swaps (KOPD ↔ EPO) invalidate the manifest correctly. KOPD-sourced
+    bundles get a `kopd:` prefix; EPO-sourced bundles use the bare 16-hex
+    fingerprint (unchanged from legacy behaviour).
+    """
+    fp_hex = ep_pdf.doc_fingerprint(b["documents"])
+    src = b["documents"][0].get("_source") if b["documents"] else None
+    return f"kopd:{fp_hex}" if src == "kopd" else fp_hex
+
+
 def _granted_claims_planned_fingerprint(
     b: dict, pub_no: str | None, kind_code: str | None,
 ) -> str:
     """
     Predict the fingerprint `_build_granted_claims_pdf` will assign, so
-    `_needs_download` can detect source swaps (PCS ↔ EPO) and force a
-    re-fetch when the source changes. Mirrors the US-side helper
+    `_needs_download` can detect source swaps (PCS ↔ KOPD ↔ EPO) and force
+    a re-fetch when the source changes. Mirrors the US-side helper
     `bundles_api._granted_claims_planned_fingerprint`.
     """
     if pub_no and kind_code and pcs_api.is_reachable():
         return f"pcs:EP-{pub_no}-{kind_code}"
-    return ep_pdf.doc_fingerprint(b["documents"])
+    return _bundle_planned_fingerprint(b)
 
 
 def _build_granted_claims_pdf(
@@ -235,14 +280,14 @@ def _build_granted_claims_pdf(
     log_label: str = "Granted_claims",
 ) -> tuple[bool, str, str, str]:
     """
-    PCS-first granted-claims builder with EPO Register merge fallback.
+    Granted-claims builder with three-source chain: PCS → KOPD → EPO Register.
 
     Returns ``(ok, source, fingerprint, reason)``:
-      source      ∈ {"pcs", "epo", ""}
-      fingerprint = "pcs:EP-{pub_no}-{kind_code}" / 16-hex doc fingerprint / ""
+      source      ∈ {"pcs", "kopd", "epo", ""}
+      fingerprint = "pcs:EP-{pub_no}-{kind_code}" / "kopd:{hex}" / 16-hex / ""
       reason      = "ok" on success, error string on failure
     """
-    # Step 1 — try PCS
+    # Step 1 — try PCS (uses pub_no + kind_code, independent of doclist source)
     if pub_no and kind_code and pcs_api.is_reachable():
         print(f"  [{log_label}] PCS reachable, querying "
               f'pn:"EP-{pub_no}-{kind_code}"', file=sys.stderr)
@@ -257,18 +302,18 @@ def _build_granted_claims_pdf(
                 return True, "pcs", f"pcs:EP-{pub_no}-{kind_code}", "ok"
             except OSError as exc:
                 print(f"  [{log_label}] pcs_api write failed: {exc} — "
-                      f"falling back to EPO merge", file=sys.stderr)
+                      f"falling back to doclist merge", file=sys.stderr)
         else:
-            print(f"  [{log_label}] pcs_api: {reason} — falling back to EPO merge",
+            print(f"  [{log_label}] pcs_api: {reason} — falling back to doclist merge",
                   file=sys.stderr)
     elif not (pub_no and kind_code):
-        print(f"  [{log_label}] missing pub_no/kind_code — using EPO merge directly",
-              file=sys.stderr)
+        print(f"  [{log_label}] missing pub_no/kind_code — skipping PCS, "
+              f"using doclist merge", file=sys.stderr)
 
-    # Step 2 — EPO Register merge fallback
     if not b["documents"]:
         return False, "", "", "no docs in granted bundle and PCS unavailable"
 
+    # Step 2/3 — doclist merge via whichever backend supplied the doclist
     bar = tqdm(total=len(b["documents"]), desc=os.path.basename(filepath),
                file=sys.stderr, leave=False)
 
@@ -276,6 +321,24 @@ def _build_granted_claims_pdf(
         _bar.set_postfix_str(f"{doc.get('code','?')} {doc['doc_type'][:40]}")
         _bar.update(1)
 
+    docs_src = b["documents"][0].get("_source", "epo")
+    fp_hex = ep_pdf.doc_fingerprint(b["documents"])
+
+    if docs_src == "kopd":
+        try:
+            merged = kopd_client.merge_bundle_pdfs(b, progress_cb=cb)
+            bar.close()
+            with open(filepath, "wb") as fh:
+                fh.write(merged.getvalue())
+            size_kb = os.path.getsize(filepath) // 1024
+            print(f"  [{log_label}] -> Saved from KOPD ({size_kb:,} KB)",
+                  file=sys.stderr)
+            return True, "kopd", f"kopd:{fp_hex}", "ok"
+        except Exception as exc:
+            bar.close()
+            return False, "", "", f"KOPD merge failed: {exc}"
+
+    # EPO Register merge (legacy default)
     try:
         merged = ep_pdf.merge_bundle_pdfs(
             session, b, app_no,
@@ -288,7 +351,7 @@ def _build_granted_claims_pdf(
         size_kb = os.path.getsize(filepath) // 1024
         print(f"  [{log_label}] -> Saved from EPO Register merge ({size_kb:,} KB)",
               file=sys.stderr)
-        return True, "epo", ep_pdf.doc_fingerprint(b["documents"]), "ok"
+        return True, "epo", fp_hex, "ok"
     except Exception as exc:
         bar.close()
         return False, "", "", str(exc)
@@ -314,7 +377,7 @@ def _download_bundles(
         if b["type"] == "granted":
             fp = _granted_claims_planned_fingerprint(b, pub_no, kind_code)
         else:
-            fp = ep_pdf.doc_fingerprint(b["documents"])
+            fp = _bundle_planned_fingerprint(b)
 
         needed, reason = _needs_download(key, filename, fp, manifest, output_dir)
         if not needed:
@@ -337,8 +400,10 @@ def _download_bundles(
                 failures.append({"key": key, "filename": filename, "reason": fail_reason})
             continue
 
-        # Other bundles: existing EPO Register page-by-page merge.
-        print(f"  [{filename}] {reason} — downloading {len(b['documents'])} docs", file=sys.stderr)
+        # Other bundles: dispatch on per-doc source (KOPD or EPO Register).
+        docs_src = b["documents"][0].get("_source", "epo")
+        print(f"  [{filename}] {reason} — downloading {len(b['documents'])} docs "
+              f"via {docs_src.upper()}", file=sys.stderr)
         bar = tqdm(total=len(b["documents"]), desc=filename, file=sys.stderr, leave=False)
 
         def cb(doc, _bar=bar):
@@ -346,11 +411,14 @@ def _download_bundles(
             _bar.update(1)
 
         try:
-            merged = ep_pdf.merge_bundle_pdfs(
-                session, b, app_no,
-                show_extra=False, show_intclaim=False,
-                progress_cb=cb,
-            )
+            if docs_src == "kopd":
+                merged = kopd_client.merge_bundle_pdfs(b, progress_cb=cb)
+            else:
+                merged = ep_pdf.merge_bundle_pdfs(
+                    session, b, app_no,
+                    show_extra=False, show_intclaim=False,
+                    progress_cb=cb,
+                )
             bar.close()
             with open(filepath, "wb") as fh:
                 fh.write(merged.getvalue())

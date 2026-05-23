@@ -189,11 +189,49 @@ Logging: every run prints TCP-probe results, `numFound` / docs returned, the `cl
 
 Implementation: top-level helpers `_granted_claims_planned_fingerprint` and `_build_granted_claims_pdf` in `bundles_api.py` are reused by the main 3-bundle flow, `_process_disclaimers`, and `_process_continuations`. Configuration env vars: `PCS_API_KEY`, `PCS_API_BASE_URL`, `PCS_API_PORT`.
 
+### EP side: pcs_api → KOPD → EPO Register fallback
+
+`Granted_claims.pdf` produced by `bundles_api_ep.py` follows the same pcs-first pattern as the US side, with **three** sources:
+
+1. **pcs_api** (`us/pcs_api.py`, shared module) — Primary source. Query: `pn:"EP-{pub_no}-{kind_code}"` (exact kind code from OPS biblio — B1, B2, or B3). When `kind_code` is missing from OPS, the PCS step is skipped and the next source runs. The same TCP probe / reachability cache as the US side is reused, so a single `PCS_API_KEY` covers both jurisdictions.
+2. **KOPD** (`ep/kopd_client.py`) — Middle source. Used when the prosecution doclist was supplied by KOPD (see "EP doclist source" below). The granted bundle's docs are downloaded from KOPD's `/docContent/download.do` endpoint. Returns the actual signed grant PDFs.
+3. **EPO Register merge** (`ep/pdf.merge_bundle_pdfs`) — Final fallback. Page-by-page fetch of "Amended claims with annotations" docs through Cloudflare.
+
+No `srch11` step for EP — Dolcera Solr is a US-only collection. PCS holds claim XML for both jurisdictions under the same `<claims>` schema, so `srch11.parse_claims` + `srch11.render_claims_pdf` are reused unchanged for rendering.
+
+Manifest fingerprints for the EP `Granted_claims` bundle:
+- `pcs:EP-{pub_no}-{kind_code}` when from pcs_api (e.g. `pcs:EP-3337077-B1`)
+- `kopd:{16-hex doc fingerprint}` when from KOPD
+- 16-hex doc fingerprint (no prefix) when from EPO Register merge
+
+Source swaps (e.g. `PCS_API_KEY` toggle, KOPD reachability change) flip the planned fingerprint and force a one-time re-fetch from the new source.
+
+Implementation: `bundles_api_ep.py::_granted_claims_planned_fingerprint` + `_build_granted_claims_pdf`. PCS pieces live in `us/pcs_api.py::build_granted_claims_pdf_ep(pub_no, kind_code, grant_date)` alongside the existing US function.
+
+### EP doclist source: KOPD → EPO Register fallback
+
+For every EP application, `bundles_api_ep.py::_fetch_doclist` tries KOPD first (`ep/kopd_client.py`) before falling back to the existing `RegisterSession.list_documents` against register.epo.org. Each returned doc dict is tagged with `_source: "kopd"` or `_source: "epo"`, and `_download_bundles` dispatches per-doc to the matching backend at download time.
+
+Why KOPD-first:
+- **No Cloudflare.** Plain HTTPS + TLS 1.2 + GlobalSign cert. Sidesteps `register.epo.org`'s Cloudflare Turnstile JS-challenge gating (which currently 403s our requests-based client).
+- **Server-rendered HTML + single JSON AJAX.** No Selenium / headless browser needed despite KIPO's own reference scripts using Selenium.
+
+Caveats:
+- KOPD's EP path proxies to **EPO's SOAP API** internally. Wide EPO outages take both sources down; KOPD specifically sidesteps Cloudflare front-end mitigation, which is not the only failure mode.
+- KOPD aggressively rate-limits by IP — TCP resets after ~5 quick requests. The client backs off (2/4/8s) and caps at 3 retries.
+- KOPD requires TLS 1.2 (rejects newer handshakes). We pin via a custom `HTTPAdapter` in `ep/kopd_client.py`.
+
+KOPD docdb key format: `EP.<app_no>.A` (e.g. `EP.16840831.A`). The `.A` suffix tells KOPD the input is an application number, not a publication number — works for both granted and pending applications. We already have `app_no` from `resolver.resolve()` so no extra metadata is required.
+
+Endpoints used:
+- `POST /kipi/getDocList2.do` (form: `docdbNum=EP.<app_no>.A`) — returns JSON `{"result": "success", "doclist": [...]}` where each entry has `docid`, `rs_doc_nm` (English doc type for EP cases), `rs_dt`, `numberOfPage`, `docformat`, `docgroup_en`. `acss_cp_rst_tpcd != ""` marks restricted-access docs which we skip.
+- `POST /docContent/download.do` (form: `docdbnum=...` + one `check` field per doc, value `<docid>!@#<pages>!@#<docformat>!@#<rs_dt>!@#<rs_doc_nm>`) — returns `application/zip` containing the PDFs.
+
 ## Architecture
 
 ```
 bundles_api.py       USPTO CLI (imports from us/)
-bundles_api_ep.py    EP CLI (imports from ep/)
+bundles_api_ep.py    EP CLI (imports from ep/ + us/pcs_api; KOPD-first doclist)
 bundles_server.py    FastAPI server (imports from us/ and ep/)
 us/                  USPTO core module — see us/CLAUDE.md
 ep/                  EP core module   — see ep/CLAUDE.md
