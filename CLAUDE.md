@@ -149,7 +149,42 @@ python bundles_api_ep.py EP2985974 --list-docs
 python bundles_api_ep.py EP2985974 --download
 python bundles_api_ep.py EP2420929 EP2985974 EP3456789B1 --download --output-dir ./bulk  # bulk
 python bundles_api_ep.py "EP2420929,EP2985974" --download --output-dir ./bulk  # comma-sep
+python bundles_api_ep.py EP3444817 --download --divisionals --output-dir ./ep_patents/   # ancestors land as siblings under ./ep_patents/
 ```
+
+### `--divisionals`
+
+If the input EP patent is itself a divisional (split off from a parent application), walk the **parent chain upward only** via the OPS register-biblio `<reg:related-documents>/<reg:division>/<reg:parent-doc>` entries and download bundles for every ancestor. Walk depth is capped at **10 levels** with a cycle guard. Long-form OPS app numbers (`YYYY0SSSSSS`, 11 digits) are normalised to short form (`YYSSSSSS`, 8 digits) automatically.
+
+Downstream children / sibling divisionals are **not** followed — this is a "fetch upstream context" feature. If you want a child's bundles, run the CLI on that child directly.
+
+Bundle types per ancestor controlled by `ep/config.py::DIVISIONAL_BUNDLES` (default `["initial", "round", "granted"]` — mirrors `SOURCE_BUNDLES`, skipping `patent_document` for speed).
+
+**Folder layout:**
+- With `--divisionals`: main lands in `<root>/EP{app_no}/`, each ancestor in a sibling `<root>/EP{ancestor_app_no}/`. Default root: `./ep_patents/`.
+- Without the flag: existing flat layout (PDFs directly in `<output-dir>/`) is unchanged.
+
+**No-op when there is no parent.** For example `EP2919231` has empty `<reg:parent-doc>` entries (it's a root with 3 child divisionals downstream — but those are not fetched). The flag produces a `related.json` with an empty `divisionals` list and exits cleanly. For a divisional like `EP3444817` (whose parent is EP2919231), `related.json` lists EP2919231 (and any further ancestors).
+
+`related.json` written to the main folder (closest ancestor first):
+```json
+{
+  "source": {
+    "jurisdiction": "EP", "app_no": "...", "pub_no": "...", "kind_code": "...",
+    "saved_at": "...", "folder": "/abs/path/to/EP{app_no}",
+    "downloaded": ["Initial_claims.pdf", "REM-CTNF-NOA.pdf", "Granted_claims.pdf"]
+  },
+  "divisionals": [
+    {"index": 1, "relationship": "divisional parent (depth 1)",
+     "via": "<child app_no whose biblio surfaced this parent>",
+     "app_no": "...", "pub_no": "...",
+     "folder_name": "EP{ancestor_app_no}", "folder": "/abs/path/...",
+     "downloaded": [...], "failures": [...]}
+  ]
+}
+```
+
+Each ancestor reuses the same PCS → KOPD → EPO Register chain as the main patent (`Granted_claims.pdf` from PCS where pub_no + kind_code are present; other bundles from KOPD when reachable, EPO Register otherwise). Each ancestor folder has its own `manifest.json` for re-run dedup.
 
 **EP credentials** — register at developers.epo.org and add to `.env`:
 ```

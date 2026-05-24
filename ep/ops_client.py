@@ -113,6 +113,186 @@ def get_register_procedural_steps(ep_number: str) -> dict | None:
 # Derived extractions — pull a clean metadata dict out of OPS biblio
 # ---------------------------------------------------------------------------
 
+def extract_divisional_parent(register_biblio: dict) -> dict | None:
+    """
+    Walk register biblio → reg:related-documents → reg:division entries
+    looking for a populated <reg:parent-doc>. Returns the parent's identifiers
+    if the patent IS a divisional, or None if it's a root (no parent).
+
+    Returned dict shape::
+
+        {"country": "EP", "app_doc_number": "...", "pub_doc_number": "..."}
+
+    Either ``app_doc_number`` or ``pub_doc_number`` may be empty depending on
+    what OPS surfaces for the parent. When OPS marks the entry with
+    ``@document-id-type``, that takes precedence; otherwise we infer based on
+    digit count (≥9 digits → application, else publication).
+
+    Skips:
+      - All-empty parent-doc entries (root patents have these as placeholders).
+      - Non-EP parents (out of scope).
+      - Duplicates: if multiple division events list the same parent, returns
+        the first one.
+    """
+    try:
+        reg_doc = _first(register_biblio["ops:world-patent-data"]
+                         ["ops:register-search"]["reg:register-documents"]
+                         ["reg:register-document"])
+        bib = reg_doc.get("reg:bibliographic-data", {})
+        related = bib.get("reg:related-documents") or {}
+        divisions = related.get("reg:division")
+    except (KeyError, TypeError, IndexError):
+        return None
+
+    if not divisions:
+        return None
+    if isinstance(divisions, dict):
+        divisions = [divisions]
+
+    seen: set[tuple[str, str]] = set()
+    for division in divisions:
+        if not isinstance(division, dict):
+            continue
+        relation = division.get("reg:relation")
+        if not isinstance(relation, dict):
+            continue
+        parent_doc = relation.get("reg:parent-doc")
+        if not isinstance(parent_doc, dict):
+            continue
+        doc_ids = parent_doc.get("reg:document-id")
+        if isinstance(doc_ids, dict):
+            doc_ids = [doc_ids]
+        if not isinstance(doc_ids, list):
+            continue
+
+        app_num, pub_num, country = "", "", ""
+        for did in doc_ids:
+            if not isinstance(did, dict):
+                continue
+            c = _txt(did.get("reg:country")).strip()
+            n = _txt(did.get("reg:doc-number")).strip()
+            if not c or not n:
+                continue  # root patents have empty placeholders
+            country = c
+            id_type = did.get("@document-id-type", "")
+            if id_type == "application number":
+                app_num = n
+            elif id_type == "publication number":
+                pub_num = n
+            elif len(n) >= 9:
+                app_num = n
+            else:
+                pub_num = n
+
+        if not country or country.upper() != "EP":
+            continue
+        key = (country, app_num or pub_num)
+        if key in seen:
+            continue
+        seen.add(key)
+        return {"country": country, "app_doc_number": app_num, "pub_doc_number": pub_num}
+
+    return None
+
+
+def extract_divisional_children(register_biblio: dict) -> list[dict]:
+    """
+    Walk register biblio → reg:related-documents → reg:division entries
+    looking for ones where THIS patent is the PARENT of the division (i.e.,
+    <reg:parent-doc> is an empty placeholder). Returns the list of child
+    identifiers.
+
+    Returned list contains dicts like::
+
+        {"country": "EP", "app_doc_number": "...", "pub_doc_number": "..."}
+
+    Either id may be empty depending on what OPS surfaces. Duplicates
+    (same child appearing in multiple division entries) are filtered.
+
+    Skips entries where <reg:parent-doc> is populated (those are upward
+    relationships handled by `extract_divisional_parent`).
+    """
+    try:
+        reg_doc = _first(register_biblio["ops:world-patent-data"]
+                         ["ops:register-search"]["reg:register-documents"]
+                         ["reg:register-document"])
+        bib = reg_doc.get("reg:bibliographic-data", {})
+        related = bib.get("reg:related-documents") or {}
+        divisions = related.get("reg:division")
+    except (KeyError, TypeError, IndexError):
+        return []
+
+    if not divisions:
+        return []
+    if isinstance(divisions, dict):
+        divisions = [divisions]
+
+    children: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for division in divisions:
+        if not isinstance(division, dict):
+            continue
+        relation = division.get("reg:relation")
+        if not isinstance(relation, dict):
+            continue
+
+        # If parent-doc is populated, the current patent is the CHILD of this
+        # division event — skip (extract_divisional_parent handles that).
+        parent_doc = relation.get("reg:parent-doc", {})
+        if isinstance(parent_doc, dict):
+            pdid = parent_doc.get("reg:document-id")
+            # Handle both dict and list-of-dict shapes
+            for pd in (pdid if isinstance(pdid, list) else [pdid] if pdid else []):
+                if not isinstance(pd, dict):
+                    continue
+                pc = _txt(pd.get("reg:country")).strip()
+                pn = _txt(pd.get("reg:doc-number")).strip()
+                if pc and pn:
+                    # parent-doc is populated → skip this entry (upward relation)
+                    parent_doc = None  # sentinel: treat as skip
+                    break
+            if parent_doc is None:
+                continue
+
+        child_doc = relation.get("reg:child-doc")
+        if not isinstance(child_doc, dict):
+            continue
+        doc_ids = child_doc.get("reg:document-id")
+        if isinstance(doc_ids, dict):
+            doc_ids = [doc_ids]
+        if not isinstance(doc_ids, list):
+            continue
+
+        app_num, pub_num, country = "", "", ""
+        for did in doc_ids:
+            if not isinstance(did, dict):
+                continue
+            c = _txt(did.get("reg:country")).strip()
+            n = _txt(did.get("reg:doc-number")).strip()
+            if not c or not n:
+                continue
+            country = c
+            id_type = did.get("@document-id-type", "")
+            if id_type == "application number":
+                app_num = n
+            elif id_type == "publication number":
+                pub_num = n
+            elif len(n) >= 9:
+                app_num = n
+            else:
+                pub_num = n
+
+        if not country or country.upper() != "EP":
+            continue
+        key = (country, app_num or pub_num)
+        if key in seen:
+            continue
+        seen.add(key)
+        children.append({"country": country, "app_doc_number": app_num, "pub_doc_number": pub_num})
+
+    return children
+
+
 def extract_application_number(register_biblio: dict) -> str | None:
     """
     Walk register biblio → bibliographic-data → application-reference → EP doc-number.

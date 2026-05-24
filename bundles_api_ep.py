@@ -112,20 +112,17 @@ def _fetch_doclist(app_no: str, session: RegisterSession) -> tuple[list[dict], s
     return docs, "epo"
 
 
-def _fetch_everything(input_number: str) -> tuple[str, str | None, dict, list[dict], RegisterSession]:
+def _fetch_meta_and_doclist(
+    app_no: str, pub_no: str | None, session: RegisterSession,
+) -> tuple[dict, list[dict]]:
     """
-    Resolve + fetch metadata + document list for an EP patent.
+    Given a pre-resolved (app_no, pub_no), fetch OPS biblio metadata and the
+    prosecution doclist (KOPD primary, EPO Register fallback). No resolve step.
 
-    Returns (app_number, pub_number, metadata, documents, register_session).
-    Raises ValueError / RuntimeError on unresolvable input or fetch failure.
+    Returns (meta, documents). Each doc dict is tagged with `_source`.
+    Reused by `_fetch_everything` (main patent) and the divisional ancestor
+    walker so we don't re-resolve identifiers we already have.
     """
-    print(f"Resolving {input_number} ...", file=sys.stderr)
-    app_no, pub_no = resolver.resolve(input_number)
-    print(f"EP application number: EP{app_no}" +
-          (f"  (publication EP{pub_no})" if pub_no else ""), file=sys.stderr)
-
-    # Pull OPS biblio for metadata (publication number preferred; if only app,
-    # we still try via /search to find the earliest publication)
     pub_biblio = ops_client.get_publication_biblio(f"EP{pub_no}") if pub_no else None
     reg_biblio = ops_client.get_register_biblio(f"EP{pub_no}") if pub_no else None
 
@@ -146,16 +143,62 @@ def _fetch_everything(input_number: str) -> tuple[str, str | None, dict, list[di
             "applicants": [],
             "ipc_codes": [],
         }
-    # Ensure app_number is populated (our truth is what the resolver returned)
-    meta["application_number"] = app_no
+    meta["application_number"] = app_no  # resolver's value wins
 
-    # Doclist: KOPD primary, EPO Register fallback. Each doc dict is tagged
-    # with `_source` so the downloader picks the right backend per doc.
-    session = RegisterSession()
     documents, doc_source = _fetch_doclist(app_no, session)
-    print(f"Found {len(documents)} documents (source: {doc_source}).",
+    print(f"Found {len(documents)} documents for EP{app_no} (source: {doc_source}).",
           file=sys.stderr)
+    documents = _dedup_same_date_amended_claims(documents)
+    return meta, documents
 
+
+def _dedup_same_date_amended_claims(docs: list[dict]) -> list[dict]:
+    """
+    EPO often surfaces both 'Amended claims filed after receipt of (European)
+    search report' and 'Amended claims with annotations' on the same date —
+    these are two views (clean + redline) of the same claim amendment event.
+    Keep only the first amended-claims doc per date.
+
+    Matches any `doc_type` whose lower-cased text starts with
+    'amended claims' (so 'Amended description with annotations' or other
+    non-claims amendments are NOT deduplicated). Preserves input order so the
+    'first' on a given date stays — mirrors the user's stated "pick the one
+    that was on the top" rule.
+    """
+    seen_dates: set[str] = set()
+    out: list[dict] = []
+    dropped = 0
+    for d in docs:
+        doc_type = (d.get("doc_type") or "").strip().lower()
+        if doc_type.startswith("amended claims"):
+            date = d.get("date") or ""
+            if date in seen_dates:
+                print(f"  [dedup] skipping duplicate amended-claims doc on "
+                      f"{date}: {d.get('doc_type','')[:60]}", file=sys.stderr)
+                dropped += 1
+                continue
+            seen_dates.add(date)
+        out.append(d)
+    if dropped:
+        print(f"  [dedup] dropped {dropped} same-date amended-claims duplicate(s)",
+              file=sys.stderr)
+    return out
+
+
+def _fetch_everything(input_number: str) -> tuple[str, str | None, dict, list[dict], RegisterSession]:
+    """
+    Resolve + fetch metadata + document list for an EP patent.
+
+    Returns (app_number, pub_number, metadata, documents, register_session).
+    Raises ValueError / RuntimeError on unresolvable input or fetch failure.
+    """
+    print(f"Resolving {input_number} ...", file=sys.stderr)
+    app_no, pub_no = resolver.resolve(input_number)
+    print(f"EP application number: EP{app_no}" +
+          (f"  (publication EP{pub_no})" if pub_no else ""), file=sys.stderr)
+
+    session = RegisterSession()
+    meta, documents = _fetch_meta_and_doclist(app_no, pub_no, session)
     return app_no, pub_no, meta, documents, session
 
 
@@ -503,6 +546,223 @@ def _finalize_manifest(output_dir: str, app_no: str, state: dict, failures: list
 
 
 # ===========================================================================
+# Divisional ancestor walk (--divisionals)
+# ===========================================================================
+
+_DIVISIONAL_MAX_DEPTH = 10
+
+
+def _walk_divisional_ancestors(
+    start_app_no: str,
+    start_pub_no: str | None,
+    max_depth: int = _DIVISIONAL_MAX_DEPTH,
+) -> list[dict]:
+    """
+    Walk upward through the EP divisional parent chain via OPS register biblio.
+
+    For each node, calls `ops_client.extract_divisional_parent(biblio)` to find
+    the populated `<reg:parent-doc>` entry (if any) and recurses to that parent.
+    Downstream children / sibling divisionals are intentionally NOT followed —
+    `--divisionals` is a "fetch upstream context" feature.
+
+    Returns ancestors in closest-first order: [direct parent, grandparent, ...].
+    Empty list when the start patent has no parent (root or no
+    `<reg:related-documents>` entries).
+
+    Bounded by ``max_depth`` and a visited-set cycle guard. Long-form OPS app
+    numbers are auto-normalised by `resolver.resolve()`.
+
+    Each entry::
+
+        {"app_no": "<short-form 8-digit>", "pub_no": "<7-digit or None>",
+         "relationship": "divisional parent", "depth": <int>,
+         "via": "<child app_no whose biblio surfaced this parent>"}
+    """
+    related: list[dict] = []
+    visited: set[str] = {start_app_no}
+    # Each queue item: (app_no, pub_no, depth)
+    queue: list[tuple[str, str | None, int]] = [(start_app_no, start_pub_no, 0)]
+
+    while queue:
+        cur_app, cur_pub, depth = queue.pop(0)
+        if depth >= max_depth:
+            print(f"  [divisionals] depth cap ({max_depth}) reached at EP{cur_app} — "
+                  f"not expanding further", file=sys.stderr)
+            continue
+        if not cur_pub:
+            # Without a publication we cannot fetch register biblio. Pending
+            # applications without pubs are reachable as endpoints but cannot
+            # surface further family members.
+            continue
+
+        biblio = ops_client.get_register_biblio(f"EP{cur_pub}")
+        if not biblio:
+            print(f"  [divisionals] depth {depth}: register biblio not "
+                  f"available for EP{cur_pub} — cannot expand from this node",
+                  file=sys.stderr)
+            continue
+
+        # Upward only: follow `extract_divisional_parent` (populated
+        # <reg:parent-doc>) and ignore the downward / sibling entries
+        # surfaced by `extract_divisional_children`. `--divisionals` is a
+        # "fetch upstream context" feature — children of the input are not
+        # downloaded.
+        candidates: list[tuple[dict, str]] = []
+        parent = ops_client.extract_divisional_parent(biblio)
+        if parent:
+            candidates.append((parent, "divisional parent"))
+
+        for cand, label in candidates:
+            resolve_input = (f"EP{cand['pub_doc_number']}" if cand.get("pub_doc_number")
+                             else f"EP{cand['app_doc_number']}")
+            try:
+                cand_app, cand_pub = resolver.resolve(resolve_input)
+            except Exception as exc:
+                print(f"  [divisionals] resolve({resolve_input}) failed: {exc} — "
+                      f"skipping this family member", file=sys.stderr)
+                continue
+            if not cand_app or cand_app in visited:
+                continue
+            visited.add(cand_app)
+            related.append({
+                "app_no":       cand_app,
+                "pub_no":       cand_pub,
+                "relationship": label,
+                "depth":        depth + 1,
+                "via":          cur_app,
+            })
+            queue.append((cand_app, cand_pub, depth + 1))
+            print(f"  [divisionals] found {label} EP{cand_app}"
+                  + (f" (publication EP{cand_pub})" if cand_pub else "")
+                  + f" via EP{cur_app}", file=sys.stderr)
+
+    return related
+
+
+def _list_pdfs(folder: str) -> list[str]:
+    """List *.pdf basenames currently in a folder (sorted)."""
+    try:
+        return sorted(f for f in os.listdir(folder) if f.lower().endswith(".pdf"))
+    except FileNotFoundError:
+        return []
+
+
+def _process_divisionals(
+    start_app_no: str,
+    start_pub_no: str | None,
+    session: RegisterSession,
+    root: str,
+) -> list[dict]:
+    """
+    Walk the EP divisional parent chain upward and download bundles for every
+    ancestor into a sibling folder under ``root``.
+
+    Each ancestor lands in <root>/EP{ancestor_app_no}/ with its own manifest.
+    Returns ordered list of ancestor-entry dicts (closest-first) for
+    related.json. Per-ancestor failures are caught and surfaced as `error`
+    fields on the entry.
+    """
+    print("\nWalking divisional parent chain ...", file=sys.stderr)
+    family = _walk_divisional_ancestors(start_app_no, start_pub_no)
+    if not family:
+        # Already-logged in the walker; just confirm we won't write any sibling folders.
+        return []
+
+    print(f"  [divisionals] {len(family)} ancestor(s) found — downloading bundles",
+          file=sys.stderr)
+
+    entries: list[dict] = []
+    for idx, rel in enumerate(family, start=1):
+        rel_app  = rel["app_no"]
+        rel_pub  = rel["pub_no"]
+        depth    = rel["depth"]
+        label    = rel["relationship"]
+        rel_folder = os.path.join(root, f"EP{rel_app}")
+        entry: dict = {
+            "index":        idx,
+            "relationship": f"{label} (depth {depth})",
+            "via":          rel.get("via"),
+            "app_no":       rel_app,
+            "pub_no":       rel_pub,
+            "folder_name":  f"EP{rel_app}",
+            "folder":       os.path.abspath(rel_folder),
+            "downloaded":   [],
+            "failures":     [],
+        }
+        print(f"\n--- related {idx}/{len(family)}: EP{rel_app} ({label}, "
+              f"depth {depth}) ---", file=sys.stderr)
+        try:
+            os.makedirs(rel_folder, exist_ok=True)
+            rel_meta, rel_docs = _fetch_meta_and_doclist(rel_app, rel_pub, session)
+
+            if not rel_docs:
+                entry["error"] = "no documents available from KOPD or EPO Register"
+                entry["downloaded"] = _list_pdfs(rel_folder)
+                entries.append(entry)
+                continue
+
+            four = ep_bundles.build_four_bundles(rel_docs)
+            to_download = [b for b in four if b["type"] in ep_config.DIVISIONAL_BUNDLES]
+            manifest = _load_manifest(rel_folder)
+            state, failures = _download_bundles(
+                to_download, session, rel_app, rel_folder, manifest,
+                pub_no=rel_meta.get("publication_number"),
+                kind_code=rel_meta.get("kind_code"),
+                grant_date=rel_meta.get("grant_date"),
+            )
+            _finalize_manifest(rel_folder, rel_app, state, failures)
+
+            entry["downloaded"] = _list_pdfs(rel_folder)
+            entry["failures"]   = [{"filename": f["filename"], "reason": f["reason"]}
+                                   for f in failures]
+            entry["status"]     = rel_meta.get("status")
+            entry["patent_number"] = rel_meta.get("patent_number")
+        except Exception as exc:
+            print(f"  [divisionals] related EP{rel_app} failed: {exc}", file=sys.stderr)
+            entry["error"]      = str(exc)
+            entry["downloaded"] = _list_pdfs(rel_folder)
+        entries.append(entry)
+
+    return entries
+
+
+def _save_related(
+    output_dir: str, app_no: str, meta: dict,
+    divisional_entries: list[dict],
+) -> None:
+    """
+    Write <output_dir>/related.json with source metadata + ordered divisional list.
+
+    `source.downloaded` reflects all *.pdf files currently in output_dir so a
+    re-run on an already-populated folder shows the full file set. Folder paths
+    are absolute. Matches the schema produced by `bundles_api._save_related` on
+    the US side.
+    """
+    payload = {
+        "source": {
+            "jurisdiction":      "EP",
+            "app_no":            app_no,
+            "pub_no":            meta.get("publication_number"),
+            "kind_code":         meta.get("kind_code"),
+            "patent_number":     meta.get("patent_number"),
+            "title":             meta.get("title"),
+            "status":            meta.get("status"),
+            "filing_date":       meta.get("filing_date"),
+            "grant_date":        meta.get("grant_date"),
+            "saved_at":          datetime.now(timezone.utc).isoformat(),
+            "folder":            os.path.abspath(output_dir),
+            "downloaded":        _list_pdfs(output_dir),
+        },
+        "divisionals": divisional_entries,
+    }
+    path = os.path.join(output_dir, "related.json")
+    with open(path, "w") as fh:
+        json.dump(payload, fh, indent=2, default=str)
+    print(f"  -> related.json written ({len(divisional_entries)} ancestor entries)",
+          file=sys.stderr)
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 
@@ -534,6 +794,16 @@ def _build_cli() -> argparse.ArgumentParser:
                    help="Human-readable text table (default: JSON)")
     p.add_argument("--list-docs",    action="store_true",
                    help="List every document + classification and exit — NO download, no bundling")
+    p.add_argument("--divisionals",  action="store_true",
+                   help="If the input EP patent is itself a divisional, also download "
+                        "bundles for every ancestor in its parent chain (immediate "
+                        "parent → ... → root, capped at 10 levels). Each ancestor lands "
+                        "in a sibling folder EP{ancestor_app_no}/ under the output root. "
+                        "Bundle types per ep/config.py DIVISIONAL_BUNDLES. Writes "
+                        "related.json in the main patent's folder. Folder layout: when "
+                        "set, main lands in <output-dir>/EP{app_no}/ (root defaults to "
+                        "./ep_patents/); without the flag the existing flat layout is "
+                        "unchanged. No-op when the patent has no parent.")
     return p
 
 
@@ -564,9 +834,22 @@ def _process_one_ep_patent(
         _cmd_list_docs(meta, documents)
         return True
 
+    # Folder layout:
+    #   * Bulk mode (parent_output_dir set) — main goes into
+    #     <parent_output_dir>/EP{app_no}/, unchanged.
+    #   * --divisionals — main goes into <root>/EP{app_no}/ so divisional
+    #     ancestor siblings can live alongside under the same <root>. Default
+    #     root is ./ep_patents/ when --output-dir isn't passed.
+    #   * Otherwise — legacy flat layout: PDFs land directly in <output-dir>/
+    #     or ./EP{app_no}/.
     if parent_output_dir is not None:
+        root       = parent_output_dir
         output_dir = os.path.join(parent_output_dir, f"EP{app_no}")
+    elif args.divisionals:
+        root       = args.output_dir if args.output_dir is not None else "./ep_patents"
+        output_dir = os.path.join(root, f"EP{app_no}")
     else:
+        root       = args.output_dir if args.output_dir is not None else "."
         output_dir = args.output_dir if args.output_dir is not None else f"EP{app_no}"
 
     # ======================================================= SEPARATE-BUNDLES mode
@@ -656,6 +939,12 @@ def _process_one_ep_patent(
             grant_date=meta.get("grant_date"),
         )
         _finalize_manifest(output_dir, app_no, state, failures)
+
+        # --divisionals: walk parent chain, download each ancestor into its own
+        # sibling folder under <root>, then write related.json in the main folder.
+        if args.divisionals:
+            divisional_entries = _process_divisionals(app_no, pub_no, session, root)
+            _save_related(output_dir, app_no, meta, divisional_entries)
 
     return True
 

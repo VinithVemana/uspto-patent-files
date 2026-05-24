@@ -87,6 +87,28 @@ def _is_ep_application_number(digits: str) -> bool:
     return bool(re.fullmatch(r"\d{8}", digits))
 
 
+def _long_to_short_app(digits: str) -> str | None:
+    """
+    Convert OPS long-form EP application number (11 digits, ``YYYY0SSSSSS``)
+    to short form (8 digits, ``YYSSSSSS``).
+
+    Example: ``20180170973`` → ``18170973``.
+
+    OPS register-biblio surfaces application numbers in the long form via
+    `<reg:doc-number>` under `<reg:document-id document-id-type="application
+    number">`. The rest of our pipeline expects the short form. Conversion:
+    last 2 of year + last 6 of the 7-digit serial (dropping the leading zero).
+    Returns None when the input doesn't fit the long-form pattern.
+    """
+    if not re.fullmatch(r"\d{11}", digits):
+        return None
+    year_short = digits[2:4]
+    seqno      = digits[4:].lstrip("0").zfill(6)
+    if len(seqno) != 6:
+        return None
+    return year_short + seqno
+
+
 def _is_ep_publication_number(digits: str) -> bool:
     """
     EP publication numbers are 7 digits for pre-2003 (EP1234567) and
@@ -155,6 +177,13 @@ def resolve(number: str) -> tuple[str, str | None]:
         # will use RegisterSession which will surface any 404/invalid number.
         return digits, None
 
+    # --- Route 4: long-form OPS application number (11 digits) ---
+    # OPS biblio sometimes surfaces application numbers as `YYYY0SSSSSS` —
+    # e.g. `20180170973`. Normalise to short form and treat as an app number.
+    short = _long_to_short_app(digits)
+    if short:
+        return short, None
+
     raise ValueError(
         f"Cannot recognise '{raw}' as an EP application, EP publication, or WO/PCT number"
     )
@@ -165,11 +194,54 @@ def resolve(number: str) -> tuple[str, str | None]:
 # ---------------------------------------------------------------------------
 
 def _resolve_ep_publication_to_app(pub_digits: str) -> str | None:
-    """Use OPS register biblio to find the application number for EP{pub_digits}."""
+    """
+    Resolve EP{pub_digits} → application number via OPS.
+
+    Tries register biblio first (authoritative). Falls back to published-data
+    biblio when the register endpoint is unavailable (intermittently 404s for
+    every record from OPS's side).
+    """
     biblio = ops_client.get_register_biblio(f"EP{pub_digits}")
-    if not biblio:
+    if biblio:
+        app = ops_client.extract_application_number(biblio)
+        if app:
+            return app
+
+    # Fallback: published-data biblio carries the same application-reference.
+    # Prefer the docdb format (short form, e.g. "16840831") over epodoc
+    # (long form "EP20160840831" with year prefix) — downstream KOPD docdb
+    # construction and EPO Register URLs both want the short form.
+    pub_biblio = ops_client.get_publication_biblio(f"EP{pub_digits}")
+    if not pub_biblio:
         return None
-    return ops_client.extract_application_number(biblio)
+    try:
+        exdoc = pub_biblio["ops:world-patent-data"]["exchange-documents"]["exchange-document"]
+        exdoc = ops_client._first(exdoc)
+        app_refs = exdoc["bibliographic-data"]["application-reference"].get("document-id", [])
+        if isinstance(app_refs, dict):
+            app_refs = [app_refs]
+        # First pass: docdb (short form)
+        for ref in app_refs:
+            if ref.get("@document-id-type") == "docdb":
+                raw = ops_client._txt(ref.get("doc-number"))
+                if raw:
+                    return raw
+        # Fallback within fallback: original (e.g. "16840831.8" — strip check digit)
+        for ref in app_refs:
+            if ref.get("@document-id-type") == "original":
+                raw = ops_client._txt(ref.get("doc-number"))
+                cleaned = re.sub(r"\.\d+$", "", raw or "")
+                if cleaned:
+                    return cleaned
+        # Last resort: epodoc (long form — strip EP + year prefix)
+        for ref in app_refs:
+            if ref.get("@document-id-type") == "epodoc":
+                raw = re.sub(r"^EP", "", ops_client._txt(ref.get("doc-number")) or "")
+                if raw:
+                    return raw
+    except (KeyError, TypeError, IndexError):
+        pass
+    return None
 
 
 def _resolve_wo_to_ep_app(wo_digits: str) -> str | None:

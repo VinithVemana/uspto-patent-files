@@ -231,6 +231,16 @@ SOURCE_BUNDLES = ["initial", "round", "granted"]  # patent_document
 
 
 # ---------------------------------------------------------------------------
+# Divisional ancestor download settings  (--divisionals)
+# ---------------------------------------------------------------------------
+# When --divisionals is set on a patent that is itself a divisional, we walk
+# upward through the parent chain (parent → grandparent → ... → root). Each
+# ancestor lands in its own sibling folder EP{ancestor_app_no}/ alongside
+# the input patent's folder. Same bundle keys as SOURCE_BUNDLES.
+DIVISIONAL_BUNDLES = ["initial", "round", "granted"]  # patent_document
+
+
+# ---------------------------------------------------------------------------
 # MIDDLE-BUNDLE ALLOWLIST — EPO doc-type substrings allowed into REM-CTNF-NOA.
 # If non-empty, ONLY docs whose `doc_type` contains one of these substrings
 # (case-insensitive, after _norm()) go into the middle/prosecution bundle.
