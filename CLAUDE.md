@@ -253,18 +253,22 @@ Source swaps (e.g. `PCS_API_KEY` toggle, KOPD reachability change) flip the plan
 
 Implementation: `bundles_api_ep.py::_granted_claims_planned_fingerprint` + `_build_granted_claims_pdf`. PCS pieces live in `us/pcs_api.py::build_granted_claims_pdf_ep(pub_no, kind_code, grant_date)` alongside the existing US function.
 
-### EP doclist source: KOPD → EPO Register fallback
+### EP doclist source: EPO Register → KOPD fallback
 
-For every EP application, `bundles_api_ep.py::_fetch_doclist` tries KOPD first (`ep/kopd_client.py`) before falling back to the existing `RegisterSession.list_documents` against register.epo.org. Each returned doc dict is tagged with `_source: "kopd"` or `_source: "epo"`, and `_download_bundles` dispatches per-doc to the matching backend at download time.
+For every EP application, `bundles_api_ep.py::_fetch_doclist` tries EPO Register first (`RegisterSession.list_documents`) before falling back to KOPD (`ep/kopd_client.py`). Each returned doc dict is tagged with `_source: "epo"` or `_source: "kopd"`, and `_download_bundles` dispatches per-doc to the matching backend at download time.
 
-Why KOPD-first:
-- **No Cloudflare.** Plain HTTPS + TLS 1.2 + GlobalSign cert. Sidesteps `register.epo.org`'s Cloudflare Turnstile JS-challenge gating (which currently 403s our requests-based client).
-- **Server-rendered HTML + single JSON AJAX.** No Selenium / headless browser needed despite KIPO's own reference scripts using Selenium.
+Why EPO Register-first:
+- **Firefox UA bypasses Cloudflare completely.** CF's managed challenge targets headless Chromium automation signals. A plain `requests.Session` with a Firefox/Gecko UA has no such signals — no challenge is presented. `JSESSIONID` is set on the first GET.
+- **POST /application is now fast.** With `JSESSIONID`, `POST /application?documentIdentifiers=<id>&number=EP<app_no>` returns the whole document as one PDF — 50–60× faster than page-by-page fetching.
+- **No rate-limiting.** Unlike KOPD (which TCP-resets after ~5 quick requests), EPO Register handles sustained request volume normally.
 
-Caveats:
-- KOPD's EP path proxies to **EPO's SOAP API** internally. Wide EPO outages take both sources down; KOPD specifically sidesteps Cloudflare front-end mitigation, which is not the only failure mode.
-- KOPD aggressively rate-limits by IP — TCP resets after ~5 quick requests. The client backs off (2/4/8s) and caps at 3 retries.
-- KOPD requires TLS 1.2 (rejects newer handshakes). We pin via a custom `HTTPAdapter` in `ep/kopd_client.py`.
+KOPD fallback retained for:
+- EPO Register outages or empty responses
+- Transient CF issues on high-traffic IPs
+
+KOPD caveats (still apply when used as fallback):
+- Aggressively rate-limits by IP — TCP resets after ~5 quick requests. Backs off (2/4/8s), 3 retries max.
+- Requires TLS 1.2 (rejects newer handshakes). Pinned via custom `HTTPAdapter` in `ep/kopd_client.py`.
 
 KOPD docdb key format: `EP.<app_no>.A` (e.g. `EP.16840831.A`). The `.A` suffix tells KOPD the input is an application number, not a publication number — works for both granted and pending applications. We already have `app_no` from `resolver.resolve()` so no extra metadata is required.
 
@@ -276,7 +280,7 @@ Endpoints used:
 
 ```
 bundles_api.py       USPTO CLI (imports from us/)
-bundles_api_ep.py    EP CLI (imports from ep/ + us/pcs_api; KOPD-first doclist)
+bundles_api_ep.py    EP CLI (imports from ep/ + us/pcs_api; EPO Register-first doclist, KOPD fallback)
 bundles_server.py    FastAPI server (imports from us/ and ep/)
 us/                  USPTO core module — see us/CLAUDE.md
 ep/                  EP core module   — see ep/CLAUDE.md

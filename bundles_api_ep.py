@@ -82,34 +82,44 @@ MANIFEST_FILE = "manifest.json"
 
 def _fetch_doclist(app_no: str, session: RegisterSession) -> tuple[list[dict], str]:
     """
-    Fetch the prosecution doc list from KOPD first; fall back to EPO Register.
+    Fetch the prosecution doc list from EPO Register first; fall back to KOPD.
 
-    Tags every returned doc dict with ``_source: "kopd"`` or ``_source: "epo"``
-    so the downloader knows which backend to use.
+    EPO Register (Firefox UA + POST path) is now the primary source — reliable,
+    fast, and no rate-limiting issues. KOPD is the fallback for when EPO Register
+    is unreachable or returns an empty list.
+
+    Tags every returned doc dict with ``_source: "epo"`` or ``_source: "kopd"``
+    so the downloader knows which backend to use for PDF fetching.
 
     Returns ``(documents, source_label)``. Raises if both sources fail.
     """
-    if kopd_client.is_reachable():
-        try:
-            docs = kopd_client.list_documents(app_no)
-            if docs:
-                for d in docs:
-                    d["_source"] = "kopd"
-                return docs, "kopd"
-            print("  [kopd] returned empty list — falling back to EPO Register",
-                  file=sys.stderr)
-        except RuntimeError as exc:
-            print(f"  [kopd] soft failure ({exc}) — falling back to EPO Register",
-                  file=sys.stderr)
-        except Exception as exc:
-            print(f"  [kopd] error ({exc}) — falling back to EPO Register",
-                  file=sys.stderr)
+    # Primary: EPO Register
+    try:
+        docs = session.list_documents(f"EP{app_no}")
+        if docs:
+            for d in docs:
+                d["_source"] = "epo"
+            return docs, "epo"
+        print("  [epo] returned empty list — falling back to KOPD", file=sys.stderr)
+    except Exception as exc:
+        print(f"  [epo] doclist error ({exc}) — falling back to KOPD", file=sys.stderr)
 
-    print("Fetching document list from EPO Register ...", file=sys.stderr)
-    docs = session.list_documents(f"EP{app_no}")
-    for d in docs:
-        d["_source"] = "epo"
-    return docs, "epo"
+    # Fallback: KOPD
+    if not kopd_client.is_reachable():
+        raise RuntimeError(
+            f"EPO Register returned no docs and KOPD is unreachable for {app_no}"
+        )
+    try:
+        docs = kopd_client.list_documents(app_no)
+        if docs:
+            for d in docs:
+                d["_source"] = "kopd"
+            return docs, "kopd"
+        raise RuntimeError(f"KOPD also returned empty list for {app_no}")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"KOPD fallback failed for {app_no}: {exc}") from exc
 
 
 def _fetch_meta_and_doclist(

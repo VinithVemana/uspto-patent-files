@@ -4,8 +4,8 @@ Core logic for fetching and organizing European Patent prosecution bundles.
 CLI entry point is `bundles_api_ep.py` at the project root.
 
 EPO OPS does **not** expose prosecution PDFs. Two sources are available:
-- **KOPD** (`kopd.kipo.go.kr:8888`) — primary. No Cloudflare, plain HTTPS+TLS1.2.
-- **EPO Register** (`register.epo.org`) — fallback. Behind Cloudflare; needs `RegisterSession` session warming.
+- **EPO Register** (`register.epo.org`) — **primary**. Firefox UA bypasses Cloudflare; `POST /application` returns whole docs in one request (50–60× faster than page-by-page).
+- **KOPD** (`kopd.kipo.go.kr:8888`) — fallback. No Cloudflare, plain HTTPS+TLS1.2. Used when EPO Register is down or returns empty.
 
 ## Module Files
 
@@ -14,11 +14,11 @@ EPO OPS does **not** expose prosecution PDFs. Two sources are available:
 | `config.py` | **User-editable** doc-type → tier classifications. `classify()` assigns tiers; `short_code()` gives 4-6 char display codes. |
 | `auth.py` | Thread-safe OAuth2 token cache for OPS. Refreshes 60 s before expiry (tokens live 1200 s). Reads `EPO_CLIENT_ID` / `EPO_CLIENT_SECRET` from `.env`. |
 | `ops_client.py` | OPS API: `get_publication_biblio()`, `get_register_biblio()`, `extract_metadata()`, `extract_application_number()`, `extract_divisional_parent()` + `extract_divisional_children()` (walk `<reg:related-documents>/<reg:division>` for `--divisionals` — upward and downward respectively). |
-| `kopd_client.py` | KOPD (KIPO Open Patent Database) doc fetcher. TLS 1.2 pinned `HTTPAdapter`, `is_reachable()` TCP probe, `list_documents(app_no)`, `fetch_doc_pdf(doc)`, `merge_bundle_pdfs(bundle)`. Primary EP doclist source; sidesteps Cloudflare. |
-| `register_client.py` | `RegisterSession`: warms Cloudflare session, parses doclist HTML, fetches PDFs. Re-warms and retries once if a PDF response isn't `%PDF-`. Fallback when KOPD is unreachable / soft-fails. |
+| `register_client.py` | `RegisterSession`: Firefox UA bypasses CF, `POST /application` fetches whole docs, smart parallel+sequential fallback. **Primary** EP doclist + PDF source. |
+| `kopd_client.py` | KOPD (KIPO Open Patent Database) doc fetcher. TLS 1.2 pinned `HTTPAdapter`, `is_reachable()` TCP probe, `list_documents(app_no)`, `fetch_doc_pdf(doc)`, `merge_bundle_pdfs(bundle)`. Fallback when EPO Register fails. |
 | `resolver.py` | Input normalization + EP/WO/PCT → application-number resolution. |
 | `bundles.py` | Bundle builder. `_is_oa_trigger()` restricts to `Search / examination` procedure. |
-| `pdf.py` | `merge_bundle_pdfs(session, bundle, app_no, ...)` — uses shared session so Cloudflare cookies persist across calls. EPO Register backend only; KOPD has its own merger. |
+| `pdf.py` | `merge_bundle_pdfs(session, bundle, app_no, ...)` — EPO Register path; KOPD fallback re-probe inside. |
 
 ## Data Flow
 
@@ -26,17 +26,17 @@ EPO OPS does **not** expose prosecution PDFs. Two sources are available:
 Input (EP app / EP pub / WO-PCT)
   → resolver.resolve()                       # normalize + pub→app via OPS register biblio
   → ops_client.get_publication_biblio()      # OAuth2 biblio metadata
-  → bundles_api_ep._fetch_doclist()          # KOPD → EPO Register fallback
-      kopd_client.list_documents(app_no)     #   primary  — POST /kipi/getDocList2.do
-      register_client.RegisterSession        #   fallback — warm CF session + BS4 parse
+  → bundles_api_ep._fetch_doclist()          # EPO Register → KOPD fallback
+      register_client.RegisterSession        #   primary  — Firefox UA GET → JSESSIONID
+      kopd_client.list_documents(app_no)     #   fallback — POST /kipi/getDocList2.do
   → bundles.build_prosecution_bundles()      # group by procedure + round
   → bundles.build_four_bundles()             # collapse to {initial, round, granted, patent_document}
   → per-doc dispatch on `_source`:
-      kopd_client.merge_bundle_pdfs(bundle)  # KOPD-sourced docs
-      pdf.merge_bundle_pdfs(session, ...)    # EPO-sourced docs
+      pdf.merge_bundle_pdfs(session, ...)    # EPO-sourced docs (POST /application per doc)
+      kopd_client.merge_bundle_pdfs(bundle)  # KOPD-sourced docs (ZIP per doc)
 ```
 
-Each doc dict from `_fetch_doclist` is tagged with `_source: "kopd"` or `_source: "epo"`. KOPD-sourced docs also carry a `_kopd` sub-dict with the raw fields the KOPD download endpoint needs (`docid`, `docformat`, `rs_dt`, `rs_doc_nm`, `numberOfPage`, `docdb`). `bundles.build_four_bundles()` preserves these passthrough fields when annotating with `code` / `direction` / `category`.
+Each doc dict from `_fetch_doclist` is tagged with `_source: "epo"` or `_source: "kopd"`. KOPD-sourced docs also carry a `_kopd` sub-dict with the raw fields the KOPD download endpoint needs (`docid`, `docformat`, `rs_dt`, `rs_doc_nm`, `numberOfPage`, `docdb`). `bundles.build_four_bundles()` preserves these passthrough fields when annotating with `code` / `direction` / `category`.
 
 ### Divisional ancestor walk (`--divisionals`)
 
