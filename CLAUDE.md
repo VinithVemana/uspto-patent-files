@@ -26,6 +26,16 @@ python bundles_api.py 12141042 --download --disclaimers --legacy-parents        
 
 Key flags: `--patent`, `--separate-bundles`, `--show-extra`, `--show-intclaim`, `--download`, `--output-dir`, `--base-url`, `--text`, `--continuations`, `--disclaimers`, `--legacy-parents`
 
+**Standalone Google Patents downloader:**
+```bash
+python download_google_patent.py US11516691          # → US11516691B2.pdf in cwd
+python download_google_patent.py 11516691            # bare number OK
+python download_google_patent.py US10902286B2        # kind code stripped automatically
+python download_google_patent.py US11516691 -o ./pdfs/  # custom output dir
+```
+
+Tries kind codes B2 → B1 → bare. Preserves original filename from Google Patents URL (kind code included). Use when you need just the granted patent PDF without the full bundle pipeline.
+
 ### Output layout
 
 Every patent — main, continuations, TDs — gets its own sibling folder under one root:
