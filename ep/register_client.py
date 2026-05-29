@@ -6,19 +6,37 @@ The EPO OPS API does NOT expose prosecution document PDFs. The authoritative
 source for communications, office actions, replies and grant decisions is the
 public EPO Register website at register.epo.org.
 
-The register is behind Cloudflare + a JSP session. Two-step access:
+The register is behind Cloudflare + a JSP session. PDF download uses a
+four-level fallback chain, fastest to slowest:
 
-  1. Warm the session by hitting a document-list page. This seeds JSESSIONID
-     and the Cloudflare cookies (__cf_bm, _cfuvid).
-  2. Fetch each PDF via the iframe-style URL
-        https://register.epo.org/application?showPdfPage=1
-             &documentId={docId}&appnumber=EP{appNum}&proc=
-     using the same Session object so the cookies travel along.
+  Path A — Playwright warm → POST /application (whole doc, 1 request)
+    Launch headless Chromium to solve any CF JS-challenge and steal cookies
+    (including cf_clearance). Then POST /application with the doc_id — EPO
+    assembles the multi-page doc server-side and returns one PDF.
+
+  Paths B+D — Smart page fetch (_fetch_pages_smart)
+    Phase 1 (parallel, 2 workers, fast-fail): all pages attempted concurrently
+    via direct session.get() — no 20/60s CF-retry waits. Successfully fetched
+    pages are cached. Pages that 403 or return non-PDF are collected.
+    Phase 2 (sequential retry): only the failed pages are retried with full
+    CF re-warm logic (30/90s backoff). Successfully cached pages are reused,
+    never re-fetched. Net result: faster for docs where CF allows concurrent
+    requests; gracefully degrades to sequential for CF-blocked pages.
+
+  Path C — KOPD re-probe (in pdf.merge_bundle_pdfs, bundle level)
+    When ALL EPO Register fetches for a bundle fail, reset KOPD's reachability
+    cache and try again. If KOPD is now up, match EPO Register docs by
+    date + doc_type and download the same content via KOPD.
+    Handled in ep/pdf.py, not here.
+
+Playwright is optional — if the `playwright` package is not installed or
+`chromium` has not been downloaded, paths A is silently skipped and the
+chain continues at path B.
 
 Exposed API:
-  - RegisterSession.warm(app_number) — establishes cookies
+  - RegisterSession.warm(app_number) — establishes cookies (tries Playwright)
   - RegisterSession.list_documents(app_number) -> list[dict]
-  - RegisterSession.fetch_pdf(doc_id, app_number) -> bytes  (raw PDF bytes)
+  - RegisterSession.fetch_pdf(doc_id, app_number) -> bytes
 
 Each returned document dict:
   {
@@ -34,7 +52,10 @@ from __future__ import annotations
 
 import io
 import re
+import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import requests
@@ -57,18 +78,28 @@ _BROWSER_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+# Playwright is optional.
+try:
+    from playwright.sync_api import sync_playwright as _sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
 
 class RegisterSession:
     """
     Thin wrapper over requests.Session that manages cookie warmup and provides
-    doclist + PDF access. Thread-unsafe by design — create one per concurrent
-    request if needed.
+    doclist + PDF access.
+
+    fetch_pdf() uses a four-level fallback chain (see module docstring).
+    _warm_lock (RLock) serialises concurrent re-warm calls from parallel workers.
     """
 
     def __init__(self) -> None:
         self._s = requests.Session()
         self._s.headers.update(_BROWSER_HEADERS)
         self._warmed_for: str | None = None
+        self._warm_lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Low-level HTTP
@@ -91,7 +122,6 @@ class RegisterSession:
                         continue
                 elif r.status_code == 403:
                     if attempt < 2:
-                        # Cloudflare transient rate-limit — wait longer before retry
                         wait = 20 if attempt == 0 else 60
                         time.sleep(wait)
                         continue
@@ -104,20 +134,93 @@ class RegisterSession:
         return r  # last response (will have non-200 status)
 
     # ------------------------------------------------------------------
-    # Session warmup — hit the doclist page to seed cookies
+    # Playwright warm — steals cf_clearance into self._s
+    # ------------------------------------------------------------------
+
+    def _try_warm_playwright(self, app_num: str) -> bool:
+        """
+        Launch headless Chromium, navigate to the doclist (solving any CF
+        JS-challenge), then steal all cookies into self._s.
+
+        Uses wait_until="load" (not "networkidle") and a 15s timeout — CF
+        challenge pages keep making XHR requests forever, so networkidle
+        never fires and burns the full timeout.
+
+        Sets self._warmed_for = app_num on success.
+        Returns True if navigation succeeded; cf_clearance presence is
+        checked separately by the caller.
+        Returns False silently if Playwright is unavailable or fails.
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            return False
+        try:
+            print(f"  [register] Playwright warm for {app_num} ...", file=sys.stderr)
+            with _sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent=_BROWSER_HEADERS["User-Agent"],
+                    extra_http_headers={
+                        "Accept": _BROWSER_HEADERS["Accept"],
+                        "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
+                    },
+                )
+                page = context.new_page()
+                page.goto(
+                    f"{REGISTER_BASE}/application?number={app_num}&tab=doclist",
+                    wait_until="load",
+                    timeout=15_000,
+                )
+                cookies = context.cookies()
+                browser.close()
+
+            for c in cookies:
+                self._s.cookies.set(c["name"], c["value"])
+            self._warmed_for = app_num
+
+            has_clearance = any(c["name"] == "cf_clearance" for c in cookies)
+            print(
+                f"  [register] Playwright warm OK — "
+                f"cf_clearance={'yes' if has_clearance else 'no'} "
+                f"({len(cookies)} cookies)",
+                file=sys.stderr,
+            )
+            return True
+        except Exception as exc:
+            print(f"  [register] Playwright warm failed ({exc})", file=sys.stderr)
+            return False
+
+    # ------------------------------------------------------------------
+    # Session warmup
     # ------------------------------------------------------------------
 
     def warm(self, app_number: str) -> None:
         """
-        Establish session cookies by GETting the doclist for *app_number*.
-        Subsequent PDF requests for the same session will succeed.
+        Establish session cookies for *app_number*.
 
-        app_number: EP application number WITH 'EP' prefix (e.g. 'EP10173239').
-                    Digits-only accepted; 'EP' is prepended automatically.
+        GET warm runs immediately (always-works, ~5-7s).
+        Playwright warm fires concurrently in a background daemon thread —
+        if it completes before the first fetch_pdf call, cf_clearance will
+        be in the cookie jar and Path A (POST) becomes available. If CF
+        blocks the headless browser, the background thread fails silently
+        and the GET-warmed session continues on Path B/D with no delay.
+
+        Already-warmed sessions return immediately; a Playwright upgrade
+        is attempted in the background if cf_clearance is still absent.
         """
         app_num = app_number if app_number.upper().startswith("EP") else f"EP{app_number}"
+
         if self._warmed_for == app_num and self._s.cookies:
+            # Already GET-warmed; kick off a background Playwright upgrade
+            # if we don't have cf_clearance yet (fire-and-forget).
+            if "cf_clearance" not in self._s.cookies and PLAYWRIGHT_AVAILABLE:
+                threading.Thread(
+                    target=self._try_warm_playwright,
+                    args=(app_num,),
+                    daemon=True,
+                ).start()
             return
+
+        # GET warm — fast, guaranteed
         r = self._get(f"/application?number={app_num}&tab=doclist")
         if r.status_code != 200:
             raise RuntimeError(
@@ -125,6 +228,14 @@ class RegisterSession:
                 f"[HTTP {r.status_code}]"
             )
         self._warmed_for = app_num
+
+        # Playwright warm in background (concurrent with caller's next steps)
+        if PLAYWRIGHT_AVAILABLE and "cf_clearance" not in self._s.cookies:
+            threading.Thread(
+                target=self._try_warm_playwright,
+                args=(app_num,),
+                daemon=True,
+            ).start()
 
     # ------------------------------------------------------------------
     # Document list — scrape the doclist HTML table
@@ -174,7 +285,6 @@ class RegisterSession:
 
         docs.sort(key=lambda d: d["date"])
         if not docs and "identivier" not in r.text:
-            # Cloudflare returned a challenge/block page instead of the real doclist
             raise RuntimeError(
                 f"Doclist for {app_num} returned 0 documents and no document "
                 f"table — likely a Cloudflare challenge page. "
@@ -183,44 +293,151 @@ class RegisterSession:
         return docs
 
     # ------------------------------------------------------------------
-    # PDF fetch — the iframe-style showPdfPage URL returns application/pdf
+    # PDF fetch — four-level fallback chain
     # ------------------------------------------------------------------
 
     def fetch_pdf(self, doc_id: str, app_number: str, *, pages: int = 1, timeout: int = 45) -> bytes:
         """
-        Download all pages of the PDF for *doc_id* and return merged bytes.
+        Download all pages of *doc_id* and return merged PDF bytes.
 
-        pages: total page count from the doclist (default 1 for callers that
-               don't have it). Each EPO Register page is a separate HTTP fetch.
+        Tries paths in order: POST whole-doc → parallel GETs → sequential GETs.
+        (KOPD re-probe is handled one level up in pdf.merge_bundle_pdfs.)
 
-        Raises RuntimeError if any page is not a valid PDF.
+        pages: total page count from the doclist (default 1).
         """
         app_num = app_number if app_number.upper().startswith("EP") else f"EP{app_number}"
         if self._warmed_for != app_num:
             self.warm(app_num)
 
         page_count = max(pages, 1)
+
+        # Path A: POST /application — whole doc in one request (needs cf_clearance)
+        if "cf_clearance" in self._s.cookies:
+            try:
+                pdf = self._post_fetch_pdf(doc_id, app_num, timeout=timeout + 15)
+                print(f"  [register] path=POST doc={doc_id}", file=sys.stderr)
+                return pdf
+            except Exception as exc:
+                print(
+                    f"  [register] POST failed ({exc}) — trying parallel GET",
+                    file=sys.stderr,
+                )
+
+        # Paths B+D: smart fetch — parallel fast-attempt, sequential retry for failures
+        return self._fetch_pages_smart(doc_id, app_num, page_count, timeout)
+
+    def _post_fetch_pdf(self, doc_id: str, app_num: str, timeout: int = 60) -> bytes:
+        """
+        POST /application with a single doc_id — EPO assembles and returns the
+        whole document as one PDF. Requires cf_clearance cookie.
+        Raises RuntimeError on 403 or non-PDF response.
+        """
+        r = self._s.post(
+            f"{REGISTER_BASE}/application",
+            data={"documentIdentifiers": doc_id, "number": app_num},
+            headers={
+                "Referer": f"{REGISTER_BASE}/application?number={app_num}&tab=doclist",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            timeout=timeout,
+        )
+        if r.status_code == 403:
+            raise RuntimeError(f"POST /application 403 (CF blocked) for {doc_id}")
+        r.raise_for_status()
+        if not r.content.startswith(b"%PDF"):
+            raise RuntimeError(
+                f"POST /application non-PDF for {doc_id}: "
+                f"status={r.status_code}, CT={r.headers.get('content-type','?')}, "
+                f"first 16={r.content[:16]!r}"
+            )
+        return r.content
+
+    def _fetch_pages_smart(
+        self, doc_id: str, app_num: str, page_count: int, timeout: int
+    ) -> bytes:
+        """
+        Two-phase page fetch:
+
+        Phase 1 — parallel (2 workers, fast-fail, no CF-retry waits):
+          All pages attempted concurrently. Uses direct self._s.get() so a
+          403 or non-PDF raises immediately without the 20/60s retry sleeps
+          in self._get(). Successfully fetched pages are cached.
+
+        Phase 2 — sequential retry (only for pages that failed in phase 1):
+          Each failed page is retried with self._fetch_page() (which does the
+          CF re-warm on non-PDF) and the full 3-attempt + 30/90s backoff loop.
+
+        This avoids two problems with a pure parallel approach:
+          * CF rate-limit waits (20s each) accumulating in parallel threads.
+          * Re-fetching pages that already succeeded when falling back to
+            sequential after a partial failure.
+        """
         if page_count == 1:
             return self._fetch_page(doc_id, app_num, 1, timeout)
 
-        merger = PdfWriter()
-        for page_num in range(1, page_count + 1):
-            if page_num > 1:
-                time.sleep(0.1)
-            # Per-page retry: Cloudflare may block mid-document; wait and re-warm
-            for attempt in range(3):
+        page_bytes: dict[int, bytes] = {}
+        failed_pages: list[int] = []
+
+        def _fetch_one_fast(n: int) -> tuple[int, bytes]:
+            if n % 2 == 0:
+                time.sleep(0.15)  # stagger the two workers
+            path = (
+                f"/application?showPdfPage={n}"
+                f"&documentId={doc_id}"
+                f"&appnumber={app_num}"
+                f"&proc="
+            )
+            r = self._s.get(f"{REGISTER_BASE}{path}", timeout=timeout)
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            if not r.content.startswith(b"%PDF"):
+                raise RuntimeError("non-PDF response")
+            return n, r.content
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futures = {ex.submit(_fetch_one_fast, n): n for n in range(1, page_count + 1)}
+            for fut in as_completed(futures):
+                n = futures[fut]
                 try:
-                    page_bytes = self._fetch_page(doc_id, app_num, page_num, timeout)
-                    break
-                except RuntimeError:
-                    if attempt < 2:
-                        wait = 30 if attempt == 0 else 90
-                        self._warmed_for = None
-                        self.warm(app_num)
-                        time.sleep(wait)
-                    else:
-                        raise
-            merger.append(io.BytesIO(page_bytes))
+                    _, data = fut.result()
+                    page_bytes[n] = data
+                except Exception:
+                    failed_pages.append(n)
+
+        if failed_pages:
+            print(
+                f"  [register] {len(failed_pages)}/{page_count} pages failed parallel "
+                f"— retrying sequentially (doc={doc_id})",
+                file=sys.stderr,
+            )
+            for page_num in sorted(failed_pages):
+                time.sleep(0.1)
+                for attempt in range(3):
+                    try:
+                        page_bytes[page_num] = self._fetch_page(
+                            doc_id, app_num, page_num, timeout
+                        )
+                        break
+                    except RuntimeError:
+                        if attempt < 2:
+                            wait = 30 if attempt == 0 else 90
+                            with self._warm_lock:
+                                self._warmed_for = None
+                                self.warm(app_num)
+                            time.sleep(wait)
+                        else:
+                            raise
+
+        pages_fetched = len(page_bytes)
+        path_label = "parallel" if not failed_pages else f"parallel+sequential({len(failed_pages)} retried)"
+        print(
+            f"  [register] path={path_label} pages={pages_fetched}/{page_count} doc={doc_id}",
+            file=sys.stderr,
+        )
+
+        merger = PdfWriter()
+        for i in range(1, page_count + 1):
+            merger.append(io.BytesIO(page_bytes[i]))
         out = io.BytesIO()
         merger.write(out)
         merger.close()
@@ -228,7 +445,10 @@ class RegisterSession:
         return out.read()
 
     def _fetch_page(self, doc_id: str, app_num: str, page_num: int, timeout: int) -> bytes:
-        """Fetch a single page of a register document. Re-warms session on non-PDF response."""
+        """
+        Fetch a single page of a register document.
+        Re-warms session once (thread-safe via _warm_lock) on non-PDF response.
+        """
         path = (
             f"/application?showPdfPage={page_num}"
             f"&documentId={doc_id}"
@@ -243,8 +463,9 @@ class RegisterSession:
             )
         content = r.content
         if not content.startswith(b"%PDF"):
-            self._warmed_for = None
-            self.warm(app_num)
+            with self._warm_lock:
+                self._warmed_for = None
+                self.warm(app_num)
             r = self._get(path, timeout=timeout)
             content = r.content
             if not content.startswith(b"%PDF"):
