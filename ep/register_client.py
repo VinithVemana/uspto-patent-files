@@ -6,15 +6,20 @@ The EPO OPS API does NOT expose prosecution document PDFs. The authoritative
 source for communications, office actions, replies and grant decisions is the
 public EPO Register website at register.epo.org.
 
-The register is behind Cloudflare + a JSP session. PDF download uses a
-four-level fallback chain, fastest to slowest:
+The register is behind Cloudflare, but only headless Chromium triggers the
+JS-challenge.  Plain requests with a Firefox UA bypasses CF entirely: the
+server returns the real doclist HTML and sets JSESSIONID, which is then
+sufficient for POST /application.
 
-  Path A — Playwright warm → POST /application (whole doc, 1 request)
-    Launch headless Chromium to solve any CF JS-challenge and steal cookies
-    (including cf_clearance). Then POST /application with the doc_id — EPO
-    assembles the multi-page doc server-side and returns one PDF.
+PDF download uses a three-level fallback chain, fastest to slowest:
 
-  Paths B+D — Smart page fetch (_fetch_pages_smart)
+  Path A — POST /application (whole doc, 1 request)
+    POST /application with doc_id + JSESSIONID → EPO assembles the whole
+    document server-side and returns one PDF.  No cf_clearance needed.
+    Requires JSESSIONID (established by the GET warm).  On 403 the session
+    is re-warmed (fresh GET) and the POST is retried once.
+
+  Path B — Smart page fetch (_fetch_pages_smart)
     Phase 1 (parallel, 2 workers, fast-fail): all pages attempted concurrently
     via direct session.get() — no 20/60s CF-retry waits. Successfully fetched
     pages are cached. Pages that 403 or return non-PDF are collected.
@@ -29,12 +34,17 @@ four-level fallback chain, fastest to slowest:
     date + doc_type and download the same content via KOPD.
     Handled in ep/pdf.py, not here.
 
-Playwright is optional — if the `playwright` package is not installed or
-`chromium` has not been downloaded, paths A is silently skipped and the
-chain continues at path B.
+NOTE on Playwright: tested and confirmed to be UNRELIABLE for EPO Register.
+  - Headless Chromium (even with stealth patches) always hits CF "Just a
+    moment" challenge and never resolves it.
+  - Headless Firefox bypasses CF, but non-deterministically (sometimes works,
+    sometimes blocked depending on CF's IP-based token bucket state).
+  - Plain requests + Firefox UA is the only reliable bypass: it bypasses
+    CF every time (with retry on transient 403s) and sets JSESSIONID.
+Playwright code is removed entirely — no Playwright import, no warm thread.
 
 Exposed API:
-  - RegisterSession.warm(app_number) — establishes cookies (tries Playwright)
+  - RegisterSession.warm(app_number) — establishes JSESSIONID via GET
   - RegisterSession.list_documents(app_number) -> list[dict]
   - RegisterSession.fetch_pdf(doc_id, app_number) -> bytes
 
@@ -64,26 +74,25 @@ from PyPDF2 import PdfWriter
 
 REGISTER_BASE = "https://register.epo.org"
 
-# Full Chrome UA + Accept headers — a bare "Mozilla/5.0" fails Cloudflare.
+# Firefox UA bypasses Cloudflare on EPO Register.
+# Chrome/Chromium UAs (including stealth-patched headless Chromium) always
+# trigger the CF JS-challenge and never pass it.  Firefox UA with plain
+# requests works because CF's rule is Chromium-automation-specific, not
+# UA-string-specific — a bare requests client with Firefox UA has no
+# navigator.webdriver, no CDP signals, and no headless-GPU fingerprint.
 _BROWSER_HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/129.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) "
+        "Gecko/20100101 Firefox/119.0"
     ),
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,*/*;q=0.8"
     ),
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
 }
-
-# Playwright is optional.
-try:
-    from playwright.sync_api import sync_playwright as _sync_playwright
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
 
 
 class RegisterSession:
@@ -91,7 +100,17 @@ class RegisterSession:
     Thin wrapper over requests.Session that manages cookie warmup and provides
     doclist + PDF access.
 
-    fetch_pdf() uses a four-level fallback chain (see module docstring).
+    Cloudflare bypass strategy: Firefox UA with plain requests.Session.
+    CF's Managed Challenge fires specifically on headless Chromium automation
+    signals (navigator.webdriver, CDP fingerprint, headless GPU flags).
+    Firefox UA with requests bypasses this completely — the server sees a
+    non-browser client with a Gecko UA and applies no JS challenge.
+
+    On the first GET, EPO Register sets JSESSIONID + __cf_bm + _cfuvid.
+    JSESSIONID is sufficient for POST /application to return PDF bytes.
+    No cf_clearance needed or possible (it is a Chromium-JS-challenge token).
+
+    fetch_pdf() uses a three-level fallback chain (see module docstring).
     _warm_lock (RLock) serialises concurrent re-warm calls from parallel workers.
     """
 
@@ -109,8 +128,12 @@ class RegisterSession:
         """
         GET a path on register.epo.org with retry logic:
           - 429 / 5xx: transient server errors — retry after 2s, 4s
-          - 403:       Cloudflare rate-limit (transient) — retry after 20s, 60s
+          - 403:       CF transient rate-limit — fresh session + retry 3s, 6s
           - network errors: retry after 2s, 4s
+
+        On 403, a new requests.Session is created (fresh cookie jar) because
+        CF's token-bucket appears to be keyed partly on cookie state — reusing
+        the same poisoned session does not help.
         """
         url = f"{REGISTER_BASE}{path}"
         for attempt in range(3):
@@ -122,8 +145,16 @@ class RegisterSession:
                         continue
                 elif r.status_code == 403:
                     if attempt < 2:
-                        wait = 20 if attempt == 0 else 60
+                        wait = 3 if attempt == 0 else 6
+                        print(
+                            f"  [register] GET 403 (CF rate-limit), "
+                            f"fresh session + {wait}s wait (attempt {attempt+1}/3)",
+                            file=sys.stderr,
+                        )
                         time.sleep(wait)
+                        # New session clears any CF-poisoned cookie state
+                        self._s = requests.Session()
+                        self._s.headers.update(_BROWSER_HEADERS)
                         continue
                 return r
             except requests.RequestException:
@@ -134,93 +165,24 @@ class RegisterSession:
         return r  # last response (will have non-200 status)
 
     # ------------------------------------------------------------------
-    # Playwright warm — steals cf_clearance into self._s
-    # ------------------------------------------------------------------
-
-    def _try_warm_playwright(self, app_num: str) -> bool:
-        """
-        Launch headless Chromium, navigate to the doclist (solving any CF
-        JS-challenge), then steal all cookies into self._s.
-
-        Uses wait_until="load" (not "networkidle") and a 15s timeout — CF
-        challenge pages keep making XHR requests forever, so networkidle
-        never fires and burns the full timeout.
-
-        Sets self._warmed_for = app_num on success.
-        Returns True if navigation succeeded; cf_clearance presence is
-        checked separately by the caller.
-        Returns False silently if Playwright is unavailable or fails.
-        """
-        if not PLAYWRIGHT_AVAILABLE:
-            return False
-        try:
-            print(f"  [register] Playwright warm for {app_num} ...", file=sys.stderr)
-            with _sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True)
-                context = browser.new_context(
-                    user_agent=_BROWSER_HEADERS["User-Agent"],
-                    extra_http_headers={
-                        "Accept": _BROWSER_HEADERS["Accept"],
-                        "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
-                    },
-                )
-                page = context.new_page()
-                page.goto(
-                    f"{REGISTER_BASE}/application?number={app_num}&tab=doclist",
-                    wait_until="load",
-                    timeout=15_000,
-                )
-                cookies = context.cookies()
-                browser.close()
-
-            for c in cookies:
-                self._s.cookies.set(c["name"], c["value"])
-            self._warmed_for = app_num
-
-            has_clearance = any(c["name"] == "cf_clearance" for c in cookies)
-            print(
-                f"  [register] Playwright warm OK — "
-                f"cf_clearance={'yes' if has_clearance else 'no'} "
-                f"({len(cookies)} cookies)",
-                file=sys.stderr,
-            )
-            return True
-        except Exception as exc:
-            print(f"  [register] Playwright warm failed ({exc})", file=sys.stderr)
-            return False
-
-    # ------------------------------------------------------------------
     # Session warmup
     # ------------------------------------------------------------------
 
     def warm(self, app_number: str) -> None:
         """
-        Establish session cookies for *app_number*.
+        Establish JSESSIONID for *app_number* via a single GET to the doclist.
 
-        GET warm runs immediately (always-works, ~5-7s).
-        Playwright warm fires concurrently in a background daemon thread —
-        if it completes before the first fetch_pdf call, cf_clearance will
-        be in the cookie jar and Path A (POST) becomes available. If CF
-        blocks the headless browser, the background thread fails silently
-        and the GET-warmed session continues on Path B/D with no delay.
+        Firefox UA bypasses Cloudflare reliably.  The GET sets JSESSIONID,
+        __cf_bm and _cfuvid — JSESSIONID is all that's needed for POST /application.
 
-        Already-warmed sessions return immediately; a Playwright upgrade
-        is attempted in the background if cf_clearance is still absent.
+        Already-warmed sessions return immediately (no-op).
+        Transient 403s are retried automatically by _get() with a fresh session.
         """
         app_num = app_number if app_number.upper().startswith("EP") else f"EP{app_number}"
 
-        if self._warmed_for == app_num and self._s.cookies:
-            # Already GET-warmed; kick off a background Playwright upgrade
-            # if we don't have cf_clearance yet (fire-and-forget).
-            if "cf_clearance" not in self._s.cookies and PLAYWRIGHT_AVAILABLE:
-                threading.Thread(
-                    target=self._try_warm_playwright,
-                    args=(app_num,),
-                    daemon=True,
-                ).start()
-            return
+        if self._warmed_for == app_num and self._s.cookies.get("JSESSIONID"):
+            return  # already have a valid session
 
-        # GET warm — fast, guaranteed
         r = self._get(f"/application?number={app_num}&tab=doclist")
         if r.status_code != 200:
             raise RuntimeError(
@@ -228,14 +190,12 @@ class RegisterSession:
                 f"[HTTP {r.status_code}]"
             )
         self._warmed_for = app_num
-
-        # Playwright warm in background (concurrent with caller's next steps)
-        if PLAYWRIGHT_AVAILABLE and "cf_clearance" not in self._s.cookies:
-            threading.Thread(
-                target=self._try_warm_playwright,
-                args=(app_num,),
-                daemon=True,
-            ).start()
+        jsid = self._s.cookies.get("JSESSIONID", "")
+        print(
+            f"  [register] session warmed for {app_num} — "
+            f"JSESSIONID={'yes' if jsid else 'NO'}",
+            file=sys.stderr,
+        )
 
     # ------------------------------------------------------------------
     # Document list — scrape the doclist HTML table
@@ -311,17 +271,18 @@ class RegisterSession:
 
         page_count = max(pages, 1)
 
-        # Path A: POST /application — whole doc in one request (needs cf_clearance)
-        if "cf_clearance" in self._s.cookies:
-            try:
-                pdf = self._post_fetch_pdf(doc_id, app_num, timeout=timeout + 15)
-                print(f"  [register] path=POST doc={doc_id}", file=sys.stderr)
-                return pdf
-            except Exception as exc:
-                print(
-                    f"  [register] POST failed ({exc}) — trying parallel GET",
-                    file=sys.stderr,
-                )
+        # Path A: POST /application — whole doc in one request.
+        # JSESSIONID (set by warm()) is sufficient — no cf_clearance required.
+        # On 403 the session is re-warmed and retried once before falling back.
+        try:
+            pdf = self._post_fetch_pdf(doc_id, app_num, timeout=timeout + 15)
+            print(f"  [register] path=POST doc={doc_id}", file=sys.stderr)
+            return pdf
+        except Exception as exc:
+            print(
+                f"  [register] POST failed ({exc}) — trying parallel GET",
+                file=sys.stderr,
+            )
 
         # Paths B+D: smart fetch — parallel fast-attempt, sequential retry for failures
         return self._fetch_pages_smart(doc_id, app_num, page_count, timeout)
@@ -329,28 +290,45 @@ class RegisterSession:
     def _post_fetch_pdf(self, doc_id: str, app_num: str, timeout: int = 60) -> bytes:
         """
         POST /application with a single doc_id — EPO assembles and returns the
-        whole document as one PDF. Requires cf_clearance cookie.
-        Raises RuntimeError on 403 or non-PDF response.
+        whole document as one PDF.  Requires JSESSIONID (set by warm()).
+
+        On 403: re-warms the session (fresh GET to establish a new JSESSIONID)
+        and retries once.  Raises RuntimeError if still failing after retry.
         """
-        r = self._s.post(
-            f"{REGISTER_BASE}/application",
-            data={"documentIdentifiers": doc_id, "number": app_num},
-            headers={
-                "Referer": f"{REGISTER_BASE}/application?number={app_num}&tab=doclist",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            timeout=timeout,
-        )
-        if r.status_code == 403:
-            raise RuntimeError(f"POST /application 403 (CF blocked) for {doc_id}")
-        r.raise_for_status()
-        if not r.content.startswith(b"%PDF"):
-            raise RuntimeError(
-                f"POST /application non-PDF for {doc_id}: "
-                f"status={r.status_code}, CT={r.headers.get('content-type','?')}, "
-                f"first 16={r.content[:16]!r}"
+        for attempt in range(2):
+            r = self._s.post(
+                f"{REGISTER_BASE}/application",
+                data={"documentIdentifiers": doc_id, "number": app_num},
+                headers={
+                    "Referer": f"{REGISTER_BASE}/application?number={app_num}&tab=doclist",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": REGISTER_BASE,
+                },
+                timeout=timeout,
             )
-        return r.content
+            if r.status_code == 403:
+                if attempt == 0:
+                    print(
+                        f"  [register] POST 403 for {doc_id} — re-warming session",
+                        file=sys.stderr,
+                    )
+                    # Force re-warm: fresh session + fresh JSESSIONID
+                    self._warmed_for = None
+                    self._s = requests.Session()
+                    self._s.headers.update(_BROWSER_HEADERS)
+                    time.sleep(3)
+                    self.warm(app_num)
+                    continue
+                raise RuntimeError(f"POST /application 403 (CF blocked) for {doc_id} after re-warm")
+            r.raise_for_status()
+            if not r.content.startswith(b"%PDF"):
+                raise RuntimeError(
+                    f"POST /application non-PDF for {doc_id}: "
+                    f"status={r.status_code}, CT={r.headers.get('content-type','?')}, "
+                    f"first 16={r.content[:16]!r}"
+                )
+            return r.content
+        raise RuntimeError(f"POST /application exhausted retries for {doc_id}")
 
     def _fetch_pages_smart(
         self, doc_id: str, app_num: str, page_count: int, timeout: int
