@@ -13,14 +13,30 @@
 | Metric | Value |
 |---|---|
 | Total patents (main) | 30 |
-| Fully complete (3/3 PDFs) | 28 |
-| Partial — PCT structural miss (Initial_claims) | 2 |
+| Fully complete (3/3 PDFs) | 30 ✅ (was 28 — PCT miss fixed post-run) |
+| Partial — PCT structural miss (Initial_claims) | 0 ✅ (was 2 — fixed via PCS A1 fallback) |
 | Divisional parents discovered | 4 |
 | Divisional parents fully complete (3/3 PDFs) | 3 |
 | Divisional parents partial (2/3 PDFs, REM missing) | 1 |
 | Total folders written | 38 (30 main + 4 divisional parents + 4 stale flat-layout artefacts at root) |
 | All Granted_claims sourced from PCS (B1) | ✅ 38/38 |
+| All Initial_claims sourced from PCS (A1) for PCT entries | ✅ 2/2 |
 | REM-CTNF-NOA zero-miss after final run | ✅ 33/33 folders that have one |
+
+---
+
+## Post-run Fix — PCS A-series fallback for PCT Initial_claims
+
+**Commit:** `da0718e` — `feat(ep): PCS A-series fallback for missing Initial_claims on PCT applications`
+
+**Problem:** 2/30 main patents (both PCT-entry) had no `Initial_claims.pdf` because the EPO Register file wrapper contains no standalone FILING docs for PCT applications. Claims are embedded in the PCT A pamphlet, which is unsuitable as a claims-only PDF.
+
+**Fix:** `us/pcs_api.py` gains `fetch_claims_xml_ep_initial(pub_no)` (probes A1→A2→A3) and `build_initial_claims_pdf_ep()`. In `_download_bundles`, when the initial bundle has zero FILING docs and PCS is reachable, the A-series fallback runs before recording a failure. Manifest fingerprint: `pcs:EP-{pub_no}-A1`. Same pub_no as the granted B1 — no extra resolution needed.
+
+| Patent | A-series hit | Claims | PDF size |
+|---|---|---|---|
+| EP3854143B1 (Apple) | A1 | 20 | 4 KB |
+| EP3821676B1 (Samsung) | A1 | 15 | 2 KB |
 
 ---
 
@@ -296,19 +312,19 @@ Raises `ValueError` on any miss. Added `_reset_session()` helper.
 
 ---
 
-#### EP3854143B1 — APPLE  ★ PCT — Initial_claims MISSING
+#### EP3854143B1 — APPLE  ★ PCT — Initial_claims from PCS A1
 | Field | Value |
 |---|---|
 | App No | 19863145 |
 | Folder | `EP19863145/` |
 | Title | Conditional Handover in Wireless Networks |
 | Divisional parent | None |
-| Initial_claims.pdf | **NOT PRESENT** |
+| Initial_claims.pdf | 4 KB — `pcs:EP-3854143-A1` (20 claims) |
 | REM-CTNF-NOA.pdf | 2,107 KB — 64 bookmarks |
 | Granted_claims.pdf | 5 KB — `pcs:EP-3854143-B1` |
-| Status | ⚠️ PARTIAL — PCT structural miss |
+| Status | ✅ PASS (Initial_claims fixed post-run via PCS A1 fallback) |
 
-**Root cause:** PCT application entering EP regional phase. EPO Register file wrapper contains no standalone "Claims" document — claims are embedded in the PCT A pamphlet. The bundle builder finds zero docs matching the `FILING` tier for initial claims. KOPD has `A1PAMPHLET` (full PCT publication, 101 pages) but this is not a suitable initial-claims substitute (contains full description + drawings). No fix available without WIPO Patentscope integration.
+**Root cause (original):** PCT application entering EP regional phase. EPO Register file wrapper has no standalone FILING docs — claims are embedded in the PCT A pamphlet. **Fix:** PCS A-series fallback probes `pn:"EP-3854143-A1"` — hit on first try, 20 claims rendered.
 
 ---
 
@@ -326,19 +342,19 @@ Raises `ValueError` on any miss. Added `_reset_session()` helper.
 
 ---
 
-#### EP3821676B1 — SAMSUNG  ★ PCT — Initial_claims MISSING
+#### EP3821676B1 — SAMSUNG  ★ PCT — Initial_claims from PCS A1
 | Field | Value |
 |---|---|
 | App No | 19846208 |
 | Folder | `EP19846208/` |
 | Title | Apparatus and Method for Idle Mode Uplink Transmission |
 | Divisional parent | None |
-| Initial_claims.pdf | **NOT PRESENT** |
+| Initial_claims.pdf | 2 KB — `pcs:EP-3821676-A1` (15 claims) |
 | REM-CTNF-NOA.pdf | 599 KB — 17 bookmarks |
 | Granted_claims.pdf | 4 KB — `pcs:EP-3821676-B1` |
-| Status | ⚠️ PARTIAL — PCT structural miss |
+| Status | ✅ PASS (Initial_claims fixed post-run via PCS A1 fallback) |
 
-**Root cause:** Same as EP3854143B1. PCT application; no standalone initial claims on the EPO Register file wrapper.
+**Root cause (original):** Same as EP3854143B1 — PCT application, no standalone FILING docs on EPO Register. **Fix:** PCS A-series fallback, 15 claims from `pn:"EP-3821676-A1"`.
 
 ---
 
