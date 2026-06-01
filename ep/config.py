@@ -250,14 +250,13 @@ DIVISIONAL_BUNDLES = ["initial", "round", "granted"]  # patent_document
 # ---------------------------------------------------------------------------
 MIDDLE_BUNDLE_TYPES: set[str] = {
     "amended claims filed after receipt of (european) search report",
-    "supplementary european search report",
-    "extended european search report",
     "european search opinion",
     "amended claims with annotations",
     "communication from the examining division",
     "annex to the communication",
     "summons to attend oral proceedings",
     "reply to communication from the examining division",
+    "amendments received before examination",
     "written submission in preparation to/during oral proceedings",
     "result of consultation by telephone/in person",
     "minutes of the oral proceedings",
