@@ -131,6 +131,12 @@ def _session_() -> requests.Session:
     return _session
 
 
+def _reset_session() -> None:
+    """Force a new session (fresh TCP connection / cookie jar) to clear rate-limit state."""
+    global _session
+    _session = None
+
+
 # ---------------------------------------------------------------------------
 # Reachability probe (cached per process, mirrors pcs_api / srch11)
 # ---------------------------------------------------------------------------
@@ -341,30 +347,80 @@ def merge_bundle_pdfs(bundle: dict, *, progress_cb=None) -> io.BytesIO:
     """
     Fetch every doc in ``bundle['documents']`` from KOPD and merge into one PDF.
 
-    Raises ValueError when the bundle is empty or all fetches failed.
+    Two-pass strategy: pass 1 attempts all docs; pass 2 retries any that
+    failed with (10s, 30s) waits to clear KOPD's rate-limit window.
+    Raises ValueError if any doc still cannot be retrieved — never writes a
+    partial PDF.
     """
     docs = bundle.get("documents") or []
     if not docs:
         raise ValueError("No documents in this bundle")
 
-    merger = PdfWriter()
-    count    = 0
-    failures: list[tuple[str, str]] = []
+    merger  = PdfWriter()
+    pending: list[dict] = []
+
+    # Pass 1 — try all docs
     for doc in docs:
         if progress_cb is not None:
             progress_cb(doc)
         try:
             pdf_bytes = fetch_doc_pdf(doc)
-            outline = f"[{doc.get('procedure','?')[:8]}] {doc.get('doc_type','?')} ({doc.get('date','')})"
+            outline = (
+                f"[{doc.get('code', doc.get('procedure','?'))[:8]}] "
+                f"{doc.get('doc_type','?')} ({doc.get('date','')})"
+            )
             merger.append(io.BytesIO(pdf_bytes), outline_item=outline)
-            count += 1
         except Exception as exc:
-            failures.append((doc.get("doc_id", "?"), str(exc)))
-        time.sleep(0.3)  # be polite to KOPD rate limiter
+            print(
+                f"  [kopd] pass-1 fail for {doc.get('doc_id','?')} "
+                f"({doc.get('doc_type','?')[:40]}): {exc} — will retry",
+                file=sys.stderr,
+            )
+            pending.append(doc)
+        time.sleep(0.5)  # be polite to KOPD rate limiter
 
-    if count == 0:
-        detail = "; ".join(f"{did}: {err[:80]}" for did, err in failures[:3])
-        raise ValueError(f"KOPD: no PDFs retrieved — {detail or 'no docs had doc_id'}")
+    # Pass 2 — retry with increasing wait to clear rate-limit window
+    still_failed: list[dict] = []
+    for doc in pending:
+        fetched = False
+        for attempt, wait in enumerate((10, 30)):
+            print(
+                f"  [kopd] retry {attempt + 1}/2 for {doc.get('doc_id','?')} "
+                f"— {wait}s wait",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+            _reset_session()
+            try:
+                pdf_bytes = fetch_doc_pdf(doc)
+                outline = (
+                    f"[{doc.get('code', doc.get('procedure','?'))[:8]}] "
+                    f"{doc.get('doc_type','?')} ({doc.get('date','')})"
+                )
+                merger.append(io.BytesIO(pdf_bytes), outline_item=outline)
+                fetched = True
+                print(
+                    f"  [kopd] retry {attempt + 1} succeeded for {doc.get('doc_id','?')}",
+                    file=sys.stderr,
+                )
+                break
+            except Exception as exc:
+                print(
+                    f"  [kopd] retry {attempt + 1} failed for {doc.get('doc_id','?')}: {exc}",
+                    file=sys.stderr,
+                )
+        if not fetched:
+            still_failed.append(doc)
+
+    if still_failed:
+        detail = "; ".join(
+            f"{d.get('doc_id','?')} ({d.get('doc_type','?')[:40]})"
+            for d in still_failed
+        )
+        raise ValueError(
+            f"KOPD: failed to retrieve {len(still_failed)}/{len(docs)} doc(s) "
+            f"after 2 retries: {detail}"
+        )
 
     out = io.BytesIO()
     merger.write(out)

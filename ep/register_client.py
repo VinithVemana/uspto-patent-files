@@ -287,15 +287,22 @@ class RegisterSession:
         # Paths B+D: smart fetch — parallel fast-attempt, sequential retry for failures
         return self._fetch_pages_smart(doc_id, app_num, page_count, timeout)
 
+    def reset(self) -> None:
+        """Force a new requests.Session (fresh cookie jar) and clear warmed state."""
+        self._s = requests.Session()
+        self._s.headers.update(_BROWSER_HEADERS)
+        self._warmed_for = None
+
     def _post_fetch_pdf(self, doc_id: str, app_num: str, timeout: int = 60) -> bytes:
         """
         POST /application with a single doc_id — EPO assembles and returns the
         whole document as one PDF.  Requires JSESSIONID (set by warm()).
 
-        On 403: re-warms the session (fresh GET to establish a new JSESSIONID)
-        and retries once.  Raises RuntimeError if still failing after retry.
+        On 403: fresh session + re-warm + retry. Three attempts with 3s/10s/30s
+        waits between them. Raises RuntimeError if still failing after all retries.
         """
-        for attempt in range(2):
+        _403_waits = (3, 10, 30)
+        for attempt in range(3):
             r = self._s.post(
                 f"{REGISTER_BASE}/application",
                 data={"documentIdentifiers": doc_id, "number": app_num},
@@ -307,19 +314,22 @@ class RegisterSession:
                 timeout=timeout,
             )
             if r.status_code == 403:
-                if attempt == 0:
+                if attempt < 2:
+                    wait = _403_waits[attempt]
                     print(
-                        f"  [register] POST 403 for {doc_id} — re-warming session",
+                        f"  [register] POST 403 for {doc_id} — re-warming session "
+                        f"+ {wait}s wait (attempt {attempt+1}/3)",
                         file=sys.stderr,
                     )
-                    # Force re-warm: fresh session + fresh JSESSIONID
                     self._warmed_for = None
                     self._s = requests.Session()
                     self._s.headers.update(_BROWSER_HEADERS)
-                    time.sleep(3)
+                    time.sleep(wait)
                     self.warm(app_num)
                     continue
-                raise RuntimeError(f"POST /application 403 (CF blocked) for {doc_id} after re-warm")
+                raise RuntimeError(
+                    f"POST /application 403 (CF blocked) for {doc_id} after 3 attempts"
+                )
             r.raise_for_status()
             if not r.content.startswith(b"%PDF"):
                 raise RuntimeError(
@@ -390,17 +400,25 @@ class RegisterSession:
             )
             for page_num in sorted(failed_pages):
                 time.sleep(0.1)
-                for attempt in range(3):
+                _page_waits = (30, 90, 180)
+                for attempt in range(4):
                     try:
                         page_bytes[page_num] = self._fetch_page(
                             doc_id, app_num, page_num, timeout
                         )
                         break
                     except RuntimeError:
-                        if attempt < 2:
-                            wait = 30 if attempt == 0 else 90
+                        if attempt < 3:
+                            wait = _page_waits[attempt]
+                            print(
+                                f"  [register] page {page_num} failed, re-warm "
+                                f"+ {wait}s wait (attempt {attempt+1}/4)",
+                                file=sys.stderr,
+                            )
                             with self._warm_lock:
                                 self._warmed_for = None
+                                self._s = requests.Session()
+                                self._s.headers.update(_BROWSER_HEADERS)
                                 self.warm(app_num)
                             time.sleep(wait)
                         else:
