@@ -145,7 +145,7 @@ class RegisterSession:
                         continue
                 elif r.status_code == 403:
                     if attempt < 2:
-                        wait = 3 if attempt == 0 else 6
+                        wait = (3, 10, 30)[attempt]
                         print(
                             f"  [register] GET 403 (CF rate-limit), "
                             f"fresh session + {wait}s wait (attempt {attempt+1}/3)",

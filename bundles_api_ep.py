@@ -62,6 +62,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 
 from tqdm import tqdm
@@ -82,18 +83,15 @@ MANIFEST_FILE = "manifest.json"
 
 def _fetch_doclist(app_no: str, session: RegisterSession) -> tuple[list[dict], str]:
     """
-    Fetch the prosecution doc list from EPO Register first; fall back to KOPD.
+    Fetch the prosecution doc list: EPO Register primary, KOPD fallback,
+    EPO Register last-resort retry if KOPD also fails.
 
-    EPO Register (Firefox UA + POST path) is now the primary source — reliable,
-    fast, and no rate-limiting issues. KOPD is the fallback for when EPO Register
-    is unreachable or returns an empty list.
-
-    Tags every returned doc dict with ``_source: "epo"`` or ``_source: "kopd"``
-    so the downloader knows which backend to use for PDF fetching.
-
-    Returns ``(documents, source_label)``. Raises if both sources fail.
+    Tags every doc with ``_source: "epo"`` or ``_source: "kopd"``.
+    Raises if all attempts fail.
     """
-    # Primary: EPO Register
+    epo_exc: Exception | None = None
+
+    # ── Attempt 1: EPO Register ───────────────────────────────────────────────
     try:
         docs = session.list_documents(f"EP{app_no}")
         if docs:
@@ -102,24 +100,50 @@ def _fetch_doclist(app_no: str, session: RegisterSession) -> tuple[list[dict], s
             return docs, "epo"
         print("  [epo] returned empty list — falling back to KOPD", file=sys.stderr)
     except Exception as exc:
+        epo_exc = exc
         print(f"  [epo] doclist error ({exc}) — falling back to KOPD", file=sys.stderr)
 
-    # Fallback: KOPD
-    if not kopd_client.is_reachable():
-        raise RuntimeError(
-            f"EPO Register returned no docs and KOPD is unreachable for {app_no}"
-        )
+    # ── Attempt 2: KOPD ───────────────────────────────────────────────────────
+    kopd_exc: Exception | None = None
+    if kopd_client.is_reachable():
+        try:
+            docs = kopd_client.list_documents(app_no)
+            if docs:
+                for d in docs:
+                    d["_source"] = "kopd"
+                return docs, "kopd"
+            print("  [kopd] returned empty list", file=sys.stderr)
+        except Exception as exc:
+            kopd_exc = exc
+            print(f"  [kopd] failed ({exc}) — retrying EPO Register after 30s",
+                  file=sys.stderr)
+    else:
+        print("  [kopd] unreachable — retrying EPO Register after 30s", file=sys.stderr)
+
+    # ── Attempt 3: EPO Register again (long wait, fresh session) ─────────────
+    # Both EPO and KOPD failed or returned empty. Wait 30s and try EPO one more
+    # time — CF rate-limit windows are usually shorter than 30s.
+    time.sleep(30)
+    print(f"  [epo] last-resort retry for EP{app_no} ...", file=sys.stderr)
     try:
-        docs = kopd_client.list_documents(app_no)
+        # Force a brand-new session to clear any CF-poisoned cookies.
+        from ep.register_client import RegisterSession as _RS
+        fresh = _RS()
+        docs = fresh.list_documents(f"EP{app_no}")
         if docs:
             for d in docs:
-                d["_source"] = "kopd"
-            return docs, "kopd"
-        raise RuntimeError(f"KOPD also returned empty list for {app_no}")
-    except RuntimeError:
-        raise
+                d["_source"] = "epo"
+            session._s = fresh._s          # absorb the warmed session
+            session._warmed_for = fresh._warmed_for
+            return docs, "epo"
+        raise RuntimeError(f"EPO Register last-resort also returned empty for {app_no}")
     except Exception as exc:
-        raise RuntimeError(f"KOPD fallback failed for {app_no}: {exc}") from exc
+        combined = (
+            f"EPO Register: {epo_exc or 'empty'}; "
+            f"KOPD: {kopd_exc or 'empty/unreachable'}; "
+            f"EPO last-resort: {exc}"
+        )
+        raise RuntimeError(f"All doclist sources failed for {app_no}: {combined}") from exc
 
 
 def _fetch_meta_and_doclist(
@@ -306,16 +330,20 @@ def _bundle_planned_fingerprint(b: dict) -> str:
 
 
 def _granted_claims_planned_fingerprint(
-    b: dict, pub_no: str | None, kind_code: str | None,
+    b: dict, pub_no: str | None,
 ) -> str:
     """
     Predict the fingerprint `_build_granted_claims_pdf` will assign, so
     `_needs_download` can detect source swaps (PCS ↔ KOPD ↔ EPO) and force
     a re-fetch when the source changes. Mirrors the US-side helper
     `bundles_api._granted_claims_planned_fingerprint`.
+
+    kind_code may be "A1" (pre-grant) from OPS biblio — PCS will probe
+    B2/B1/B3 automatically, so any pub_no is sufficient for PCS eligibility.
     """
-    if pub_no and kind_code and pcs_api.is_reachable():
-        return f"pcs:EP-{pub_no}-{kind_code}"
+    if pub_no and pcs_api.is_reachable():
+        # Use "B?" as placeholder — actual resolved kind code baked in at save time.
+        return f"pcs:EP-{pub_no}-B?"
     return _bundle_planned_fingerprint(b)
 
 
@@ -334,27 +362,34 @@ def _build_granted_claims_pdf(
       fingerprint = "pcs:EP-{pub_no}-{kind_code}" / "kopd:{hex}" / 16-hex / ""
       reason      = "ok" on success, error string on failure
     """
-    # Step 1 — try PCS (uses pub_no + kind_code, independent of doclist source)
-    if pub_no and kind_code and pcs_api.is_reachable():
-        print(f"  [{log_label}] PCS reachable, querying "
-              f'pn:"EP-{pub_no}-{kind_code}"', file=sys.stderr)
-        buf, reason = pcs_api.build_granted_claims_pdf_ep(pub_no, kind_code, grant_date)
-        if buf is not None:
-            try:
-                with open(filepath, "wb") as fh:
-                    fh.write(buf.getvalue())
-                size_kb = os.path.getsize(filepath) // 1024
-                print(f"  [{log_label}] -> Saved from pcs_api ({size_kb:,} KB)",
-                      file=sys.stderr)
-                return True, "pcs", f"pcs:EP-{pub_no}-{kind_code}", "ok"
-            except OSError as exc:
-                print(f"  [{log_label}] pcs_api write failed: {exc} — "
+    # Step 1 — try PCS (probes B2/B1/B3 regardless of OPS kind_code; only needs pub_no)
+    if pub_no and pcs_api.is_reachable():
+        print(f"  [{log_label}] PCS reachable, probing B2/B1/B3 for EP{pub_no}",
+              file=sys.stderr)
+        xml, resolved_kc = pcs_api.fetch_claims_xml_ep(pub_no, kind_code)
+        if xml is not None:
+            buf, render_reason = pcs_api._render_from_xml(
+                xml, f"EP{pub_no}{resolved_kc}", grant_date
+            )
+            if buf is not None:
+                try:
+                    with open(filepath, "wb") as fh:
+                        fh.write(buf.getvalue())
+                    size_kb = os.path.getsize(filepath) // 1024
+                    print(f"  [{log_label}] -> Saved from pcs_api "
+                          f"({size_kb:,} KB, kind={resolved_kc})", file=sys.stderr)
+                    return True, "pcs", f"pcs:EP-{pub_no}-{resolved_kc}", "ok"
+                except OSError as exc:
+                    print(f"  [{log_label}] pcs_api write failed: {exc} — "
+                          f"falling back to doclist merge", file=sys.stderr)
+            else:
+                print(f"  [{log_label}] pcs_api render: {render_reason} — "
                       f"falling back to doclist merge", file=sys.stderr)
         else:
-            print(f"  [{log_label}] pcs_api: {reason} — falling back to doclist merge",
-                  file=sys.stderr)
-    elif not (pub_no and kind_code):
-        print(f"  [{log_label}] missing pub_no/kind_code — skipping PCS, "
+            print(f"  [{log_label}] pcs_api: no match (B2/B1/B3) — "
+                  f"falling back to doclist merge", file=sys.stderr)
+    elif not pub_no:
+        print(f"  [{log_label}] missing pub_no — skipping PCS, "
               f"using doclist merge", file=sys.stderr)
 
     if not b["documents"]:
@@ -415,14 +450,16 @@ def _download_bundles(
     failures: list[dict] = []
 
     for b in bundles:
-        if not b["documents"]:
+        # Granted bundle with no EPO Register docs may still be served by PCS —
+        # skip the empty-doc early-exit for "granted" type only.
+        if not b["documents"] and b["type"] != "granted":
             continue
         filename = f"{b['filename']}.pdf"
         key      = f"bundle_{b['filename']}"
         filepath = os.path.join(output_dir, filename)
 
         if b["type"] == "granted":
-            fp = _granted_claims_planned_fingerprint(b, pub_no, kind_code)
+            fp = _granted_claims_planned_fingerprint(b, pub_no)
         else:
             fp = _bundle_planned_fingerprint(b)
 

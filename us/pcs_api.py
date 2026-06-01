@@ -235,19 +235,30 @@ def fetch_claims_xml(patent_number: str) -> str | None:
     return _pick_claims_xml(clm, prefer_lang=None)
 
 
-def fetch_claims_xml_ep(pub_no: str, kind_code: str) -> str | None:
+def fetch_claims_xml_ep(pub_no: str, kind_code: str | None = None) -> tuple[str | None, str | None]:
     """
-    EP granted-publication claim XML via PCS proxy. Returns None on miss.
+    EP granted-publication claim XML via PCS proxy.
 
-    ``kind_code`` is required (B1, B2, B3). Callers should skip the PCS
-    path entirely when OPS biblio doesn't supply one. PCS stores EP
-    claims in DE/EN/FR — we always pick the English variant.
+    Tries B2 → B1 → B3 regardless of ``kind_code`` from OPS biblio (which is
+    often "A1" — the pre-grant publication). When ``kind_code`` is a B-series
+    code it is tried first. Returns ``(xml, resolved_kind_code)`` or
+    ``(None, None)`` on miss. PCS stores EP claims in DE/EN/FR — picks EN.
     """
-    query = f'pn:"EP-{pub_no}-{kind_code}"'
-    clm = _post_pcs_query(query, f"EP{pub_no}{kind_code}")
-    if not clm:
-        return None
-    return _pick_claims_xml(clm, prefer_lang="EN")
+    # Build the order: hint first (if B-series), then remaining B variants.
+    hint = kind_code.upper() if kind_code and kind_code.upper().startswith("B") else None
+    order = [hint] if hint else []
+    for kc in ("B2", "B1", "B3"):
+        if kc != hint:
+            order.append(kc)
+
+    for kc in order:
+        query = f'pn:"EP-{pub_no}-{kc}"'
+        clm = _post_pcs_query(query, f"EP{pub_no}{kc}")
+        if clm:
+            xml = _pick_claims_xml(clm, prefer_lang="EN")
+            if xml:
+                return xml, kc
+    return None, None
 
 
 def _render_from_xml(
@@ -297,21 +308,19 @@ def build_granted_claims_pdf(
 
 
 def build_granted_claims_pdf_ep(
-    pub_no: str, kind_code: str, grant_date: str | None = None
+    pub_no: str, kind_code: str | None = None, grant_date: str | None = None
 ) -> tuple[io.BytesIO | None, str]:
     """
-    EP end-to-end: reachability → PCS fetch → parse → render.
+    EP end-to-end: reachability → PCS fetch (B2/B1/B3) → parse → render.
 
-    ``kind_code`` (B1/B2/B3) must be supplied — when OPS biblio doesn't
-    return one, callers should skip pcs_api and fall through to EPO
-    Register directly. Returns ``(pdf_buf, reason)``; on failure
-    ``pdf_buf`` is None and the caller falls back to EPO merge.
+    ``kind_code`` is optional — when OPS biblio returns "A1" (pre-grant) or
+    nothing, the function tries B2 → B1 → B3 automatically. When it IS a
+    B-series code it is tried first. Returns ``(pdf_buf, reason)``; on
+    failure ``pdf_buf`` is None and the caller falls back to EPO merge.
     """
     if not is_reachable():
         return None, "pcs_api unreachable"
-    if not kind_code:
-        return None, "missing kind_code"
-    xml = fetch_claims_xml_ep(pub_no, kind_code)
+    xml, resolved_kc = fetch_claims_xml_ep(pub_no, kind_code)
     if xml is None:
         return None, "no pcs_api match"
-    return _render_from_xml(xml, f"EP{pub_no}{kind_code}", grant_date)
+    return _render_from_xml(xml, f"EP{pub_no}{resolved_kc}", grant_date)

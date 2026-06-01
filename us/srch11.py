@@ -225,6 +225,14 @@ def render_claims_pdf(
     inline ``"N. "`` stripped from the lead text.
     """
     buf = io.BytesIO()
+    # If patent_number already has a country prefix (e.g. "EP3248411B1"),
+    # use it verbatim; otherwise assume US and prepend.
+    import re as _re
+    display_header = (
+        patent_number
+        if _re.match(r"^[A-Z]{2}", patent_number)
+        else f"US{patent_number}"
+    )
     doc = SimpleDocTemplate(
         buf,
         pagesize=LETTER,
@@ -232,7 +240,7 @@ def render_claims_pdf(
         rightMargin=0.9 * inch,
         topMargin=0.8 * inch,
         bottomMargin=0.8 * inch,
-        title=f"US{patent_number} — Granted Claims",
+        title=f"{display_header} — Granted Claims",
         author="",
     )
 
@@ -274,7 +282,7 @@ def render_claims_pdf(
         return [lead_style, sub1_style, sub2_style][min(depth, 2)]
 
     story: list = [
-        Paragraph(f"US {_escape(patent_number)} &mdash; Granted Claims",
+        Paragraph(f"{_escape(display_header)} &mdash; Granted Claims",
                   title_style),
         # Paragraph(
         #     f"Grant date: {_escape(grant_date) if grant_date else 'N/A'} "
