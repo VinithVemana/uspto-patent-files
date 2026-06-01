@@ -213,6 +213,7 @@ def render_claims_pdf(
     statement: str,
     patent_number: str,
     grant_date: str | None = None,
+    label: str = "Granted Claims",
 ) -> io.BytesIO:
     """
     Render parsed claims to a PDF using reportlab. Returns a BytesIO ready
@@ -240,7 +241,7 @@ def render_claims_pdf(
         rightMargin=0.9 * inch,
         topMargin=0.8 * inch,
         bottomMargin=0.8 * inch,
-        title=f"{display_header} — Granted Claims",
+        title=f"{display_header} — {label}",
         author="",
     )
 
@@ -282,7 +283,7 @@ def render_claims_pdf(
         return [lead_style, sub1_style, sub2_style][min(depth, 2)]
 
     story: list = [
-        Paragraph(f"{_escape(display_header)} &mdash; Granted Claims",
+        Paragraph(f"{_escape(display_header)} &mdash; {_escape(label)}",
                   title_style),
         # Paragraph(
         #     f"Grant date: {_escape(grant_date) if grant_date else 'N/A'} "

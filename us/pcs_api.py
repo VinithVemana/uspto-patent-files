@@ -304,7 +304,8 @@ def build_initial_claims_pdf_ep(
 
 
 def _render_from_xml(
-    xml: str, display_pn: str, grant_date: str | None
+    xml: str, display_pn: str, grant_date: str | None,
+    label: str = "Granted Claims",
 ) -> tuple[io.BytesIO | None, str]:
     """Parse claim XML and render to PDF — shared by US and EP builders."""
     try:
@@ -323,7 +324,7 @@ def _render_from_xml(
           f"— claim 1 lead: {first_lead[:80]}...", file=sys.stderr)
 
     try:
-        buf = srch11.render_claims_pdf(claims, statement, display_pn, grant_date)
+        buf = srch11.render_claims_pdf(claims, statement, display_pn, grant_date, label)
         print(f"    [pcs_api] rendered PDF ({len(buf.getvalue()):,} bytes)",
               file=sys.stderr)
         return buf, "ok"

@@ -518,7 +518,8 @@ def _download_bundles(
             xml, resolved_kc = pcs_api.fetch_claims_xml_ep_initial(pub_no)
             if xml is not None:
                 buf, render_reason = pcs_api._render_from_xml(
-                    xml, f"EP{pub_no}{resolved_kc}", filing_date
+                    xml, f"EP{pub_no}{resolved_kc}", filing_date,
+                    label="Initial Claims",
                 )
                 if buf is not None:
                     try:
