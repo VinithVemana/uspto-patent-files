@@ -18,7 +18,7 @@ BULK MODE
 Pass multiple patents as space-, comma-, or pipe-separated values.
 Each patent gets its own subfolder inside --output-dir.
 
-    python bundles_api_ep.py EP2420929 EP2985974 EP3456789B1 --download --output-dir ./bulk
+    python bundles_api_ep.py EP2919231B1 --download --output-dir ./bulk
     python bundles_api_ep.py "EP2420929,EP2985974,EP3456789B1" --download --output-dir ./bulk
     python bundles_api_ep.py "EP2420929|EP2985974|EP3456789B1" --download --output-dir ./bulk
 
@@ -164,33 +164,27 @@ def _fetch_meta_and_doclist(
 
 def _dedup_same_date_amended_claims(docs: list[dict]) -> list[dict]:
     """
-    EPO often surfaces both 'Amended claims filed after receipt of (European)
-    search report' and 'Amended claims with annotations' on the same date —
-    these are two views (clean + redline) of the same claim amendment event.
-    Keep only the first amended-claims doc per date.
-
-    Matches any `doc_type` whose lower-cased text starts with
-    'amended claims' (so 'Amended description with annotations' or other
-    non-claims amendments are NOT deduplicated). Preserves input order so the
-    'first' on a given date stays — mirrors the user's stated "pick the one
-    that was on the top" rule.
+    Drop exact-duplicate amended-claims docs: same date AND same doc_type.
+    Different doc types on the same date (e.g. 'Amended claims filed after
+    receipt of...' + 'Amended claims with annotations') are NOT deduplicated —
+    they are distinct documents (clean version vs. redline).
     """
-    seen_dates: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     out: list[dict] = []
     dropped = 0
     for d in docs:
         doc_type = (d.get("doc_type") or "").strip().lower()
         if doc_type.startswith("amended claims"):
-            date = d.get("date") or ""
-            if date in seen_dates:
-                print(f"  [dedup] skipping duplicate amended-claims doc on "
-                      f"{date}: {d.get('doc_type','')[:60]}", file=sys.stderr)
+            key = (d.get("date") or "", doc_type)
+            if key in seen:
+                print(f"  [dedup] skipping exact-duplicate amended-claims doc on "
+                      f"{d.get('date','')}: {d.get('doc_type','')[:60]}", file=sys.stderr)
                 dropped += 1
                 continue
-            seen_dates.add(date)
+            seen.add(key)
         out.append(d)
     if dropped:
-        print(f"  [dedup] dropped {dropped} same-date amended-claims duplicate(s)",
+        print(f"  [dedup] dropped {dropped} exact-duplicate amended-claims doc(s)",
               file=sys.stderr)
     return out
 
