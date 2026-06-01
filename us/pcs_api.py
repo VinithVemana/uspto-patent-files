@@ -34,11 +34,15 @@ suffix.
        ``pn:"US-{patent_no}-B2" OR pn:"US-{patent_no}-B1"``
        Reissue (E1/E2), design (S1), and plant (P1–P3) kinds fall through.
 
-  EP — exact kind code from OPS biblio (B1 / B2 / B3):
-       ``pn:"EP-{pub_no}-{kind_code}"``
-       When OPS doesn't return a kind code, the EP path is skipped.
+  EP granted — probes B2 → B1 → B3 (OPS often returns "A1" kind_code):
+               ``pn:"EP-{pub_no}-{kind_code}"``
 
-The first response doc's ``clm[0]`` is the granted-publication claim XML.
+  EP initial  — probes A1 → A2 → A3 (pre-grant / PCT publication):
+               ``pn:"EP-{pub_no}-{kind_code}"``
+               Fallback for PCT applications where EPO Register has no
+               standalone FILING docs. A1/A2 pub_no is the same as B1/B2.
+
+The first response doc's ``clm[0]`` is the claim XML.
 """
 
 from __future__ import annotations
@@ -259,6 +263,44 @@ def fetch_claims_xml_ep(pub_no: str, kind_code: str | None = None) -> tuple[str 
             if xml:
                 return xml, kc
     return None, None
+
+
+def fetch_claims_xml_ep_initial(pub_no: str) -> tuple[str | None, str | None]:
+    """
+    EP pre-grant (initial) claim XML via PCS proxy.
+
+    Probes A1 → A2 → A3 using the same publication number as the granted
+    patent. Returns ``(xml, resolved_kind_code)`` or ``(None, None)`` on miss.
+    PCS stores EP claims in DE/EN/FR — picks EN.
+
+    Used as a fallback when the EPO Register file wrapper has no standalone
+    FILING docs (typical for PCT applications entering the EP regional phase).
+    """
+    for kc in ("A1", "A2", "A3"):
+        query = f'pn:"EP-{pub_no}-{kc}"'
+        clm = _post_pcs_query(query, f"EP{pub_no}{kc}")
+        if clm:
+            xml = _pick_claims_xml(clm, prefer_lang="EN")
+            if xml:
+                return xml, kc
+    return None, None
+
+
+def build_initial_claims_pdf_ep(
+    pub_no: str, filing_date: str | None = None
+) -> tuple[io.BytesIO | None, str]:
+    """
+    EP initial-claims end-to-end: reachability → PCS fetch (A1/A2/A3) → parse → render.
+
+    Returns ``(pdf_buf, reason)``; on failure ``pdf_buf`` is None and ``reason``
+    explains why. Caller falls back to recording a failure entry.
+    """
+    if not is_reachable():
+        return None, "pcs_api unreachable"
+    xml, resolved_kc = fetch_claims_xml_ep_initial(pub_no)
+    if xml is None:
+        return None, "no pcs_api match"
+    return _render_from_xml(xml, f"EP{pub_no}{resolved_kc}", filing_date)
 
 
 def _render_from_xml(

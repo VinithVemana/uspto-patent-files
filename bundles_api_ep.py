@@ -347,6 +347,22 @@ def _granted_claims_planned_fingerprint(
     return _bundle_planned_fingerprint(b)
 
 
+def _initial_claims_planned_fingerprint(
+    b: dict, pub_no: str | None,
+) -> str:
+    """
+    Predict the fingerprint for the initial bundle.
+
+    When there are no FILING docs but PCS is reachable, PCS A-series may
+    supply the PDF (PCT applications). Uses "A?" placeholder so a source
+    swap forces a re-fetch. When docs exist, falls through to the normal
+    doc-based fingerprint.
+    """
+    if not b["documents"] and pub_no and pcs_api.is_reachable():
+        return f"pcs:EP-{pub_no}-A?"
+    return _bundle_planned_fingerprint(b)
+
+
 def _build_granted_claims_pdf(
     b: dict,
     pub_no: str | None, kind_code: str | None, grant_date: str | None,
@@ -443,23 +459,32 @@ def _download_bundles(
     bundles: list[dict], session: RegisterSession, app_no: str, output_dir: str,
     manifest: dict,
     pub_no: str | None = None, kind_code: str | None = None,
-    grant_date: str | None = None,
+    grant_date: str | None = None, filing_date: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """Download the 4-bundle collapse. Returns (artifacts_state, failures)."""
     state: dict = {}
     failures: list[dict] = []
 
     for b in bundles:
-        # Granted bundle with no EPO Register docs may still be served by PCS —
-        # skip the empty-doc early-exit for "granted" type only.
-        if not b["documents"] and b["type"] != "granted":
-            continue
+        # Skip empty bundles unless a PCS fallback is available.
+        # - granted: PCS B-series may cover even when EPO Register is empty.
+        # - initial: PCS A-series fallback for PCT applications (no standalone FILING docs).
+        if not b["documents"]:
+            if b["type"] == "granted":
+                pass
+            elif b["type"] == "initial" and pub_no and pcs_api.is_reachable():
+                pass
+            else:
+                continue
+
         filename = f"{b['filename']}.pdf"
         key      = f"bundle_{b['filename']}"
         filepath = os.path.join(output_dir, filename)
 
         if b["type"] == "granted":
             fp = _granted_claims_planned_fingerprint(b, pub_no)
+        elif b["type"] == "initial":
+            fp = _initial_claims_planned_fingerprint(b, pub_no)
         else:
             fp = _bundle_planned_fingerprint(b)
 
@@ -480,6 +505,43 @@ def _download_bundles(
             if ok:
                 state[key] = {"filename": filename, "fingerprint": fp_actual, "needed": True}
             else:
+                print(f"    -> Failed: {fail_reason}", file=sys.stderr)
+                failures.append({"key": key, "filename": filename, "reason": fail_reason})
+            continue
+
+        # Initial bundle with no FILING docs: PCS A-series fallback (PCT applications).
+        if b["type"] == "initial" and not b["documents"]:
+            print(f"  [{filename}] {reason} — no FILING docs, trying PCS A1/A2/A3",
+                  file=sys.stderr)
+            print(f"  [{filename}] PCS reachable, probing A1/A2/A3 for EP{pub_no}",
+                  file=sys.stderr)
+            xml, resolved_kc = pcs_api.fetch_claims_xml_ep_initial(pub_no)
+            if xml is not None:
+                buf, render_reason = pcs_api._render_from_xml(
+                    xml, f"EP{pub_no}{resolved_kc}", filing_date
+                )
+                if buf is not None:
+                    try:
+                        with open(filepath, "wb") as fh:
+                            fh.write(buf.getvalue())
+                        size_kb = os.path.getsize(filepath) // 1024
+                        print(f"  [{filename}] -> Saved from pcs_api "
+                              f"({size_kb:,} KB, kind={resolved_kc})", file=sys.stderr)
+                        state[key] = {
+                            "filename": filename,
+                            "fingerprint": f"pcs:EP-{pub_no}-{resolved_kc}",
+                            "needed": True,
+                        }
+                    except OSError as exc:
+                        fail_reason = f"pcs_api write failed: {exc}"
+                        print(f"    -> Failed: {fail_reason}", file=sys.stderr)
+                        failures.append({"key": key, "filename": filename, "reason": fail_reason})
+                else:
+                    fail_reason = f"PCS A-series render failed: {render_reason}"
+                    print(f"    -> Failed: {fail_reason}", file=sys.stderr)
+                    failures.append({"key": key, "filename": filename, "reason": fail_reason})
+            else:
+                fail_reason = "no FILING docs and PCS A-series miss"
                 print(f"    -> Failed: {fail_reason}", file=sys.stderr)
                 failures.append({"key": key, "filename": filename, "reason": fail_reason})
             continue
@@ -750,6 +812,7 @@ def _process_divisionals(
                 pub_no=rel_meta.get("publication_number"),
                 kind_code=rel_meta.get("kind_code"),
                 grant_date=rel_meta.get("grant_date"),
+                filing_date=rel_meta.get("filing_date"),
             )
             _finalize_manifest(rel_folder, rel_app, state, failures)
 
@@ -978,6 +1041,7 @@ def _process_one_ep_patent(
             pub_no=meta.get("publication_number"),
             kind_code=meta.get("kind_code"),
             grant_date=meta.get("grant_date"),
+            filing_date=meta.get("filing_date"),
         )
         _finalize_manifest(output_dir, app_no, state, failures)
 
