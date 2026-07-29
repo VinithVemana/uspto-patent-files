@@ -31,3 +31,8 @@ trial cases.docx
 
 # macOS
 .DS_Store
+
+# Stress-test artifacts
+us_stress_test_out/
+ep_stress_test_out/
+bulk/
